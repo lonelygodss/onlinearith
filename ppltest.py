@@ -4,15 +4,26 @@ from datasets import load_dataset
 from tqdm import tqdm
 
 # 1. 加载模型
-model_path = "Qwen/Qwen3-0.6B"
-device = "cuda"
+model_path = "../Qwen3-0.6B"
+if torch.backends.mps.is_available(): ## macbook 跑起来很慢，基本上10s/iter
+    device = "mps"
+elif torch.cuda.is_available():
+    device = "cuda"
+else:
+    device = "cpu"
+
+dtype = torch.float16 if device == "mps" else torch.float32
+
 
 print("正在加载模型...")
-tokenizer = AutoTokenizer.from_pretrained(model_path)
-model = AutoModelForCausalLM.from_pretrained(
-    model_path, 
-    device_map="cuda", 
-)
+tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
+
+model_kwargs = {"local_files_only": True, "torch_dtype": dtype}
+if device == "cuda":
+    model_kwargs["device_map"] = "auto"
+
+model = AutoModelForCausalLM.from_pretrained(model_path, **model_kwargs)
+model.to(device)
 model.eval()
 
 # 2. 加载测试数据 (WikiText-2)

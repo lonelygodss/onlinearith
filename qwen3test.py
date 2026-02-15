@@ -1,13 +1,14 @@
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-model_name = "Qwen/Qwen3-0.6B"
+model_name = "../Qwen3-0.6B"
 
 # load the tokenizer and the model
-tokenizer = AutoTokenizer.from_pretrained(model_name)
+tokenizer = AutoTokenizer.from_pretrained(model_name, local_files_only=True)
 model = AutoModelForCausalLM.from_pretrained(
     model_name,
     torch_dtype="auto",
-    device_map="cuda"
+    device_map="auto",
+    local_files_only=True
 )
 
 # prepare the model input
