@@ -1,15 +1,29 @@
 from transformers import AutoModelForCausalLM, AutoTokenizer
+import torch
 
 model_name = "../Qwen3-0.6B"
+if torch.backends.mps.is_available(): ## macbook 跑起来很慢，基本上10s/iter
+    device = "mps"
+elif torch.cuda.is_available():
+    device = "cuda"
+else:
+    device = "cpu"
+
+dtype = torch.float16 if device == "mps" else torch.float32
+
+model_kwargs = {"local_files_only": True, "torch_dtype": dtype}
+if device == "cuda":
+    model_kwargs["device_map"] = "cuda"
 
 # load the tokenizer and the model
 tokenizer = AutoTokenizer.from_pretrained(model_name, local_files_only=True)
 model = AutoModelForCausalLM.from_pretrained(
     model_name,
-    torch_dtype="auto",
-    device_map="auto",
-    local_files_only=True
+    **model_kwargs
 )
+model.to(device)
+model.eval()
+
 
 # prepare the model input
 prompt = "Give me a short introduction to large language model."
