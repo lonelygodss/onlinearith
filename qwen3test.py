@@ -1,5 +1,7 @@
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import torch
+from transformers.utils import logging
+logging.set_verbosity_info()
 
 model_name = "../Qwen3-0.6B"
 if torch.backends.mps.is_available(): ## macbook 跑起来很慢，基本上10s/iter

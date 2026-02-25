@@ -20,7 +20,7 @@ tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
 
 model_kwargs = {"local_files_only": True, "torch_dtype": dtype}
 if device == "cuda":
-    model_kwargs["device_map"] = "auto"
+    model_kwargs["device_map"] = "cuda"
 
 model = AutoModelForCausalLM.from_pretrained(model_path, **model_kwargs)
 model.to(device)
