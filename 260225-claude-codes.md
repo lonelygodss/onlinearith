@@ -83,7 +83,7 @@ Created [](file:///home/xzjnew/coding/onlinearith/test_mxfp8linear.py)
 Ran terminal command:  cd /home/xzjnew/coding && source .venv_310/bin/activate && python onlinearith/test_mxfp8linear.py
 
 All 6 tests pass. Here's a summary of what changed and how the computation works:
-
+ 
 ---
 
 ### What changed in `MXFP8Linear`

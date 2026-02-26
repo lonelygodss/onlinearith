@@ -1,65 +1,204 @@
+"""
+Perplexity (PPL) evaluation script with richer metrics and reliable computation.
+
+Metrics reported:
+  - Token-level Perplexity  (standard NLP metric)
+  - Word-level  Perplexity  (normalized by whitespace-split word count)
+  - Bits-per-Byte   (BPB)   (compression-quality measure)
+  - Bits-per-Char   (BPC)
+  - Average NLL (nats)
+  - Throughput  (tokens / second)
+  - Peak GPU/CPU memory
+  - Per-chunk NLL stats  (mean ± std, useful for reliability)
+
+Fix vs. original script:
+  The original averaged per-window losses directly.  Because windows have
+  different numbers of scored tokens (trg_len), that is WRONG.  The correct
+  approach is to accumulate  (loss × trg_len)  and divide by total scored tokens.
+"""
+
+import json
+import math
+import time
+from pathlib import Path
+
+import numpy as np
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
 from datasets import load_dataset
 from tqdm import tqdm
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
-# 1. 加载模型
-model_path = "../Qwen3-0.6B"
-if torch.backends.mps.is_available(): ## macbook 跑起来很慢，基本上10s/iter
-    device = "mps"
-elif torch.cuda.is_available():
-    device = "cuda"
-else:
-    device = "cpu"
+# ── Config ────────────────────────────────────────────────────────────────────
+MODEL_PATH  = "../Qwen3-0.6B"
+DATASET     = ("wikitext", "wikitext-2-raw-v1", "test")   # (name, config, split)
+MAX_LENGTH  = 4096   # max context window fed to the model
+STRIDE      = 512    # sliding-window stride (≤ MAX_LENGTH)
+RESULTS_OUT = "ppl_results.json"
+# ─────────────────────────────────────────────────────────────────────────────
 
-dtype = torch.float16 if device == "mps" else torch.float32
+def get_device_and_dtype():
+    if torch.backends.mps.is_available():
+        return "mps", torch.float16
+    if torch.cuda.is_available():
+        return "cuda", torch.float16   # fp16 is safe & faster on CUDA
+    return "cpu", torch.float32
 
 
-print("正在加载模型...")
-tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
+def peak_memory_str(device: str) -> str:
+    """Return peak allocated memory as a human-readable string."""
+    if device == "cuda":
+        bytes_ = torch.cuda.max_memory_allocated()
+        return f"{bytes_ / 1024**3:.2f} GB"
+    if device == "mps":
+        bytes_ = torch.mps.current_allocated_memory()
+        return f"{bytes_ / 1024**3:.2f} GB"
+    return "N/A (CPU)"
 
-model_kwargs = {"local_files_only": True, "torch_dtype": dtype}
+
+def reset_peak_memory(device: str):
+    if device == "cuda":
+        torch.cuda.reset_peak_memory_stats()
+
+
+# ── 1. Load model ────────────────────────────────────────────────────────────
+device, dtype = get_device_and_dtype()
+print(f"Device: {device}  |  dtype: {dtype}")
+
+print("Loading tokenizer & model …")
+tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, local_files_only=True)
+
+model_kwargs: dict = {"local_files_only": True, "torch_dtype": dtype}
 if device == "cuda":
     model_kwargs["device_map"] = "cuda"
 
-model = AutoModelForCausalLM.from_pretrained(model_path, **model_kwargs)
+model = AutoModelForCausalLM.from_pretrained(MODEL_PATH, **model_kwargs)
 model.to(device)
 model.eval()
+reset_peak_memory(device)
 
-# 2. 加载测试数据 (WikiText-2)
-print("加载数据集...")
-test = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
-encodings = tokenizer("\n\n".join(test["text"]), return_tensors="pt")
+# Print model summary
+num_params = sum(p.numel() for p in model.parameters())
+print(f"Model: {MODEL_PATH}  |  Params: {num_params/1e6:.1f}M")
 
-# 3. 计算 Perplexity (PPL)
-max_length = 4096
-stride = 512 # 滑动窗口步长
-seq_len = encodings.input_ids.size(1)
+# ── 2. Load & encode dataset ─────────────────────────────────────────────────
+ds_name, ds_config, ds_split = DATASET
+print(f"\nLoading dataset: {ds_name}/{ds_config} ({ds_split}) …")
+test_data = load_dataset(ds_name, ds_config, split=ds_split)
+raw_text  = "\n\n".join(test_data["text"])
 
-nlls = []
+encodings = tokenizer(raw_text, return_tensors="pt")
+seq_len   = encodings.input_ids.size(1)
+
+# Reference counts for word/char/byte PPL
+num_words = len(raw_text.split())
+num_chars = len(raw_text)
+num_bytes = len(raw_text.encode("utf-8"))
+
+print(f"Tokens: {seq_len:,}  |  Words: {num_words:,}  |  Chars: {num_chars:,}  |  Bytes: {num_bytes:,}")
+
+# ── 3. Sliding-window PPL (correct token-weighted accumulation) ───────────────
+print(f"\nComputing PPL  (max_length={MAX_LENGTH}, stride={STRIDE}) …")
+
+# We accumulate sum of (loss_i × trg_len_i) and total scored tokens
+total_nll_sum   = 0.0   # sum of (avg_loss_per_token × trg_len) across windows
+total_tokens    = 0     # total number of scored tokens
+per_chunk_nlls  = []    # per-chunk average NLL for reliability stats
+
 prev_end_loc = 0
+t_start = time.perf_counter()
 
-print(f"开始计算 PPL，总 Token 数: {seq_len}")
+for begin_loc in tqdm(range(0, seq_len, STRIDE), desc="PPL windows"):
+    end_loc = min(begin_loc + MAX_LENGTH, seq_len)
+    trg_len = end_loc - prev_end_loc   # tokens scored in this window
 
-for begin_loc in tqdm(range(0, seq_len, stride)):
-    end_loc = min(begin_loc + max_length, seq_len)
-    trg_len = end_loc - prev_end_loc  # 这里的逻辑可能需要根据具体 stride 策略微调，这是简化版
-    
-    input_ids = encodings.input_ids[:, begin_loc:end_loc].to(device)
+    input_ids  = encodings.input_ids[:, begin_loc:end_loc].to(device)
     target_ids = input_ids.clone()
-    target_ids[:, :-trg_len] = -100 # 忽略上下文部分的 loss
+    target_ids[:, :-trg_len] = -100   # mask context tokens; only score trg_len tokens
 
     with torch.no_grad():
         outputs = model(input_ids, labels=target_ids)
-        # loss is calculated using CrossEntropyLoss which averages over valid labels
-        # N.B. the model only calculates loss over trg_len - 1 labels, because it internally shifts the labels
-        # to the left by 1.
-        neg_log_likelihood = outputs.loss
+        # outputs.loss is the mean NLL over the trg_len scored tokens
+        avg_nll = outputs.loss.item()
 
-    nlls.append(neg_log_likelihood)
+    # Weighted accumulation — this is the correct approach
+    total_nll_sum  += avg_nll * trg_len
+    total_tokens   += trg_len
+    per_chunk_nlls.append(avg_nll)
+
     prev_end_loc = end_loc
     if end_loc == seq_len:
         break
 
-ppl = torch.exp(torch.stack(nlls).mean())
-print(f"\nResult - Perplexity: {ppl.item():.2f}")
+elapsed = time.perf_counter() - t_start
+
+# ── 4. Compute metrics ───────────────────────────────────────────────────────
+mean_nll = total_nll_sum / total_tokens   # nats per token
+
+token_ppl = math.exp(mean_nll)
+# Word PPL: exp( total_nats / num_words )   — total_nats = mean_nll × total_tokens
+word_ppl  = math.exp(mean_nll * total_tokens / num_words)
+# BPB: bits per byte = (total_nats / num_bytes) / ln(2)
+bpb       = (mean_nll * total_tokens / num_bytes) / math.log(2)
+# BPC: bits per character
+bpc       = (mean_nll * total_tokens / num_chars)  / math.log(2)
+
+throughput = total_tokens / elapsed   # tokens / second
+
+chunk_arr = np.array(per_chunk_nlls)
+chunk_mean, chunk_std = chunk_arr.mean(), chunk_arr.std()
+
+mem_str = peak_memory_str(device)
+
+# ── 5. Print results ─────────────────────────────────────────────────────────
+SEP = "─" * 52
+print(f"\n{SEP}")
+print(f"{'PERPLEXITY EVALUATION RESULTS':^52}")
+print(SEP)
+print(f"  Dataset          : {ds_name}/{ds_config} ({ds_split})")
+print(f"  Model            : {MODEL_PATH}")
+print(f"  Scored tokens    : {total_tokens:,}  (stride={STRIDE})")
+print(SEP)
+print(f"  Token Perplexity : {token_ppl:.4f}")
+print(f"  Word  Perplexity : {word_ppl:.4f}")
+print(f"  Bits-per-Byte    : {bpb:.4f}")
+print(f"  Bits-per-Char    : {bpc:.4f}")
+print(f"  Mean NLL (nats)  : {mean_nll:.4f}")
+print(SEP)
+print(f"  Chunks evaluated : {len(per_chunk_nlls)}")
+print(f"  Chunk NLL mean   : {chunk_mean:.4f}")
+print(f"  Chunk NLL std    : {chunk_std:.4f}  (lower = more stable)")
+print(SEP)
+print(f"  Throughput       : {throughput:.1f} tokens/s")
+print(f"  Wall time        : {elapsed:.1f}s")
+print(f"  Peak memory      : {mem_str}")
+print(SEP)
+
+# ── 6. Save results to JSON ──────────────────────────────────────────────────
+results = {
+    "model": MODEL_PATH,
+    "dataset": f"{ds_name}/{ds_config}/{ds_split}",
+    "config": {"max_length": MAX_LENGTH, "stride": STRIDE, "dtype": str(dtype)},
+    "metrics": {
+        "token_perplexity": round(token_ppl, 4),
+        "word_perplexity":  round(word_ppl,  4),
+        "bits_per_byte":    round(bpb, 4),
+        "bits_per_char":    round(bpc, 4),
+        "mean_nll_nats":    round(mean_nll, 4),
+    },
+    "reliability": {
+        "num_chunks":     len(per_chunk_nlls),
+        "chunk_nll_mean": round(float(chunk_mean), 4),
+        "chunk_nll_std":  round(float(chunk_std),  4),
+        "scored_tokens":  total_tokens,
+    },
+    "performance": {
+        "throughput_tokens_per_sec": round(throughput, 1),
+        "wall_time_sec":             round(elapsed, 2),
+        "peak_memory":               mem_str,
+    },
+}
+
+out_path = Path(__file__).parent / RESULTS_OUT
+with open(out_path, "w") as f:
+    json.dump(results, f, indent=2)
+print(f"\nResults saved → {out_path}")
