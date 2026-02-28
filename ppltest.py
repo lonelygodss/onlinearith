@@ -16,6 +16,8 @@ Fix vs. original script:
   different numbers of scored tokens (trg_len), that is WRONG.  The correct
   approach is to accumulate  (loss × trg_len)  and divide by total scored tokens.
 """
+import os
+os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 
 import json
 import math
@@ -69,10 +71,11 @@ tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, local_files_only=True)
 
 model_kwargs: dict = {"local_files_only": True, "torch_dtype": dtype}
 if device == "cuda":
-    model_kwargs["device_map"] = "cuda"
+    model_kwargs["device_map"] = "auto"   # distributes across available GPUs
 
 model = AutoModelForCausalLM.from_pretrained(MODEL_PATH, **model_kwargs)
-model.to(device)
+# NOTE: do NOT call model.to(device) when using device_map="auto";
+# the model is already placed on the correct device(s) by accelerate.
 model.eval()
 reset_peak_memory(device)
 
@@ -97,6 +100,11 @@ num_bytes = len(raw_text.encode("utf-8"))
 print(f"Tokens: {seq_len:,}  |  Words: {num_words:,}  |  Chars: {num_chars:,}  |  Bytes: {num_bytes:,}")
 
 # ── 3. Sliding-window PPL (correct token-weighted accumulation) ───────────────
+# Derive the device that model inputs should be sent to.
+# With device_map="auto" the model may span multiple devices; the first
+# parameter's device is where the embedding layer lives and where input_ids go.
+input_device = next(model.parameters()).device
+print(f"Input device: {input_device}")
 print(f"\nComputing PPL  (max_length={MAX_LENGTH}, stride={STRIDE}) …")
 
 # We accumulate sum of (loss_i × trg_len_i) and total scored tokens
@@ -111,7 +119,7 @@ for begin_loc in tqdm(range(0, seq_len, STRIDE), desc="PPL windows"):
     end_loc = min(begin_loc + MAX_LENGTH, seq_len)
     trg_len = end_loc - prev_end_loc   # tokens scored in this window
 
-    input_ids  = encodings.input_ids[:, begin_loc:end_loc].to(device)
+    input_ids  = encodings.input_ids[:, begin_loc:end_loc].to(input_device)
     target_ids = input_ids.clone()
     target_ids[:, :-trg_len] = -100   # mask context tokens; only score trg_len tokens
 

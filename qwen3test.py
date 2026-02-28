@@ -15,7 +15,7 @@ dtype = torch.float16 if device == "mps" else torch.float32
 
 model_kwargs = {"local_files_only": True, "torch_dtype": dtype}
 if device == "cuda":
-    model_kwargs["device_map"] = "cuda"
+    model_kwargs["device_map"] = "auto"
 
 # load the tokenizer and the model
 tokenizer = AutoTokenizer.from_pretrained(model_name, local_files_only=True)
