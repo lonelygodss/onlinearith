@@ -1,21 +1,29 @@
 """
 Batch PPL evaluation across all MSD / MXFP configuration combinations.
 
-Loads the model ONCE, then iterates through every setup by patching
-config fields in-memory (no config.json editing needed).  Each run's
-results are saved to a separate JSON file under the naming convention
+Supports **multi-GPU** via torchrun:
+    torchrun --nproc_per_node=8 ppl_batch.py             # all 21 setups on 8 GPUs
+    torchrun --nproc_per_node=4 ppl_batch.py --only 2 6  # subset on 4 GPUs
+    python ppl_batch.py                                   # single-GPU fallback
+
+Each GPU loads its own model copy and processes a shard of the setups.
+Setups are partitioned round-robin across ranks; each rank writes its
+result files independently (no inter-rank communication during eval).
+Rank 0 prints the summary after all ranks finish.
+
+Loads the model ONCE per rank, then iterates through every assigned setup
+by patching config fields in-memory.  Each run's results are saved to
     ppl_results_{tag}.json
 
 Skips setups whose result file already exists (resume-safe).
 
 Usage:
-    cd /home/xzjnew/coding/onlinearith
-    source /home/xzjnew/coding/.venv_310/bin/activate
-    python ppl_batch.py                  # run all setups
-    python ppl_batch.py --list           # list setups without running
-    python ppl_batch.py --only 1 6 10    # run only setup #1, #6, #10
-    python ppl_batch.py --skip-existing  # skip setups with existing result files (default)
-    python ppl_batch.py --force          # re-run even if result file exists
+    cd /home/xzj/coding/onlinearith
+    torchrun --nproc_per_node=8 ppl_batch.py                 # run all setups
+    torchrun --nproc_per_node=8 ppl_batch.py --list          # list setups (rank 0)
+    torchrun --nproc_per_node=8 ppl_batch.py --only 1 6 10   # run only selected
+    torchrun --nproc_per_node=8 ppl_batch.py --force         # re-run even if done
+    python ppl_batch.py                                       # single-GPU fallback
 """
 
 import argparse
@@ -29,6 +37,13 @@ import torch
 from datasets import load_dataset
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
+from dist_utils import (
+    barrier,
+    cleanup_distributed,
+    init_distributed,
+    is_main,
+)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 MODEL_PATH  = "../Qwen3-0.6B"
@@ -146,23 +161,15 @@ _BASELINE_OVERRIDES = {
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def get_device_and_dtype():
-    if torch.backends.mps.is_available():
-        return "mps", torch.float16
-    if torch.cuda.is_available():
-        return "cuda", torch.float16
-    return "cpu", torch.float32
-
-
 def peak_memory_str(device):
-    if device == "cuda":
-        return f"{torch.cuda.max_memory_allocated() / 1024**3:.2f} GB"
+    if device.type == "cuda":
+        return f"{torch.cuda.max_memory_allocated(device) / 1024**3:.2f} GB"
     return "N/A"
 
 
 def reset_peak_memory(device):
-    if device == "cuda":
-        torch.cuda.reset_peak_memory_stats()
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
 
 
 def apply_config(config, overrides):
@@ -171,7 +178,8 @@ def apply_config(config, overrides):
         setattr(config, k, v)
 
 
-def evaluate_ppl(model, encodings, device, seq_len, num_words, num_chars, num_bytes):
+def evaluate_ppl(model, encodings, device, seq_len, num_words, num_chars, num_bytes,
+                 show_progress=True):
     """Run sliding-window PPL and return a results dict."""
     reset_peak_memory(device)
 
@@ -181,7 +189,8 @@ def evaluate_ppl(model, encodings, device, seq_len, num_words, num_chars, num_by
     prev_end_loc = 0
     t_start = time.perf_counter()
 
-    for begin_loc in tqdm(range(0, seq_len, STRIDE), desc="  PPL windows", leave=False):
+    for begin_loc in tqdm(range(0, seq_len, STRIDE), desc="  PPL windows",
+                          leave=False, disable=not show_progress):
         end_loc = min(begin_loc + MAX_LENGTH, seq_len)
         trg_len = end_loc - prev_end_loc
 
@@ -244,14 +253,20 @@ def main():
                         help="Re-run even if result file already exists")
     args = parser.parse_args()
 
-    # ── List mode ──
+    # ── Distributed init ──
+    rank, world_size, local_rank, device = init_distributed()
+    dtype = torch.float16 if device.type == "cuda" else torch.float32
+
+    # ── List mode (rank 0 only, then exit) ──
     if args.list:
-        print(f"{'ID':>3}  {'Tag':<30}  Description")
-        print("─" * 75)
-        for sid, tag, desc, _ in SETUPS:
-            result_file = RESULTS_DIR / f"ppl_results_{tag}.json"
-            exists = "  ✓ (done)" if result_file.exists() else ""
-            print(f"{sid:3d}  {tag:<30}  {desc}{exists}")
+        if is_main(rank):
+            print(f"{'ID':>3}  {'Tag':<30}  Description")
+            print("-" * 75)
+            for sid, tag, desc, _ in SETUPS:
+                result_file = RESULTS_DIR / f"ppl_results_{tag}.json"
+                exists = "  (done)" if result_file.exists() else ""
+                print(f"{sid:3d}  {tag:<30}  {desc}{exists}")
+        cleanup_distributed()
         return
 
     # ── Filter setups ──
@@ -259,34 +274,41 @@ def main():
         selected = {s for s in args.only}
         run_setups = [(s, t, d, c) for s, t, d, c in SETUPS if s in selected]
         if not run_setups:
-            print(f"No matching setup IDs: {args.only}")
-            print(f"Valid IDs: {[s[0] for s in SETUPS]}")
+            if is_main(rank):
+                print(f"No matching setup IDs: {args.only}")
+                print(f"Valid IDs: {[s[0] for s in SETUPS]}")
+            cleanup_distributed()
             return
     else:
         run_setups = list(SETUPS)
 
-    # ── Device & model ──
-    device, dtype = get_device_and_dtype()
-    print(f"Device: {device}  |  dtype: {dtype}")
-    print(f"Total setups to evaluate: {len(run_setups)}")
-    print()
+    # Partition setups across ranks (round-robin)
+    my_setups = run_setups[rank::world_size]
 
-    print("Loading tokenizer & model …")
+    if is_main(rank):
+        print(f"World size: {world_size}  |  Device: {device}  |  dtype: {dtype}")
+        print(f"Total setups: {len(run_setups)}  |  Setups on this rank: {len(my_setups)}")
+        print()
+
+    # ── Device & model ──
+    if is_main(rank):
+        print("Loading tokenizer & model ...")
+
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, local_files_only=True)
     model_kwargs = {"local_files_only": True, "torch_dtype": dtype}
-    if device == "cuda":
-        model_kwargs["device_map"] = "cuda"
-
     model = AutoModelForCausalLM.from_pretrained(MODEL_PATH, **model_kwargs)
     model.to(device)
     model.eval()
 
-    num_params = sum(p.numel() for p in model.parameters())
-    print(f"Model: {MODEL_PATH}  |  Params: {num_params/1e6:.1f}M")
+    if is_main(rank):
+        num_params = sum(p.numel() for p in model.parameters())
+        print(f"Model: {MODEL_PATH}  |  Params: {num_params/1e6:.1f}M")
 
     # ── Dataset ──
     ds_name, ds_config, ds_split = DATASET
-    print(f"Loading dataset: {ds_name}/{ds_config} ({ds_split}) …")
+    if is_main(rank):
+        print(f"Loading dataset: {ds_name}/{ds_config} ({ds_split}) ...")
+
     test_data = load_dataset(ds_name, ds_config, split=ds_split)
     raw_text  = "\n\n".join(test_data["text"])
     encodings = tokenizer(raw_text, return_tensors="pt")
@@ -294,27 +316,31 @@ def main():
     num_words = len(raw_text.split())
     num_chars = len(raw_text)
     num_bytes = len(raw_text.encode("utf-8"))
-    print(f"Tokens: {seq_len:,}  |  Words: {num_words:,}")
-    print()
 
-    # ── Run setups ──
-    summary = []
+    if is_main(rank):
+        print(f"Tokens: {seq_len:,}  |  Words: {num_words:,}")
+        print()
+
+    barrier()
+
+    # ── Run assigned setups ──
+    local_summary = []
     total_start = time.perf_counter()
 
-    for i, (sid, tag, desc, overrides) in enumerate(run_setups):
+    for i, (sid, tag, desc, overrides) in enumerate(my_setups):
         result_file = RESULTS_DIR / f"ppl_results_{tag}.json"
-        print(f"{'═'*60}")
-        print(f"  [{i+1}/{len(run_setups)}]  Setup #{sid}: {desc}")
-        print(f"  Tag: {tag}  →  {result_file.name}")
-        print(f"{'═'*60}")
+        print(f"[rank {rank}] {'='*55}")
+        print(f"[rank {rank}]   [{i+1}/{len(my_setups)}]  Setup #{sid}: {desc}")
+        print(f"[rank {rank}]   Tag: {tag}  ->  {result_file.name}")
+        print(f"[rank {rank}] {'='*55}")
 
         # Skip if exists
         if result_file.exists() and not args.force:
             with open(result_file) as f:
                 existing = json.load(f)
             ppl = existing.get("metrics", {}).get("token_perplexity", "?")
-            print(f"  ⏭  Already exists (PPL={ppl}). Use --force to re-run.\n")
-            summary.append((sid, tag, ppl, "skipped"))
+            print(f"[rank {rank}]   Already exists (PPL={ppl}). Use --force to re-run.\n")
+            local_summary.append((sid, tag, ppl, "skipped"))
             continue
 
         # Reset to baseline, then apply this setup's overrides
@@ -333,11 +359,12 @@ def main():
             v = getattr(model.config, k, None)
             if v is not None and v is not False:
                 active_flags.append(f"{k}={v}")
-        print(f"  Config: {', '.join(active_flags) or '(baseline fp16)'}")
+        print(f"[rank {rank}]   Config: {', '.join(active_flags) or '(baseline fp16)'}")
 
         # Evaluate
         results = evaluate_ppl(model, encodings, device, seq_len,
-                               num_words, num_chars, num_bytes)
+                               num_words, num_chars, num_bytes,
+                               show_progress=is_main(rank))
 
         # Add metadata
         results["setup"] = {"id": sid, "tag": tag, "description": desc,
@@ -354,23 +381,42 @@ def main():
 
         ppl = results["metrics"]["token_perplexity"]
         wall = results["performance"]["wall_time_sec"]
-        print(f"  ✓  PPL={ppl:.4f}  |  {wall:.0f}s  |  saved → {result_file.name}\n")
-        summary.append((sid, tag, ppl, f"{wall:.0f}s"))
+        print(f"[rank {rank}]   PPL={ppl:.4f}  |  {wall:.0f}s  |  saved -> {result_file.name}\n")
+        local_summary.append((sid, tag, ppl, f"{wall:.0f}s"))
 
+    local_elapsed = time.perf_counter() - total_start
+
+    # ── Wait for all ranks to finish ──
+    barrier()
     total_elapsed = time.perf_counter() - total_start
 
-    # ── Summary ──
-    print()
-    print(f"{'═'*60}")
-    print(f"  BATCH COMPLETE  ({total_elapsed/60:.1f} min total)")
-    print(f"{'═'*60}")
-    print(f"{'ID':>3}  {'Tag':<30}  {'PPL':>10}  {'Time':>8}")
-    print("─" * 60)
-    for sid, tag, ppl, t in summary:
-        ppl_str = f"{ppl:.4f}" if isinstance(ppl, float) else str(ppl)
-        print(f"{sid:3d}  {tag:<30}  {ppl_str:>10}  {t:>8}")
-    print("─" * 60)
-    print(f"Results saved in: {RESULTS_DIR}")
+    # ── Summary (rank 0 reads all result files) ──
+    if is_main(rank):
+        print()
+        print(f"{'='*60}")
+        print(f"  BATCH COMPLETE  ({total_elapsed/60:.1f} min total, {world_size} GPUs)")
+        print(f"{'='*60}")
+        print(f"{'ID':>3}  {'Tag':<30}  {'PPL':>10}  {'Time':>8}")
+        print("-" * 60)
+
+        for sid, tag, desc, _ in run_setups:
+            result_file = RESULTS_DIR / f"ppl_results_{tag}.json"
+            if result_file.exists():
+                with open(result_file) as f:
+                    res = json.load(f)
+                ppl = res.get("metrics", {}).get("token_perplexity", "?")
+                wall = res.get("performance", {}).get("wall_time_sec", "?")
+                ppl_str = f"{ppl:.4f}" if isinstance(ppl, float) else str(ppl)
+                wall_str = f"{wall:.0f}s" if isinstance(wall, (int, float)) else str(wall)
+            else:
+                ppl_str = "MISSING"
+                wall_str = "-"
+            print(f"{sid:3d}  {tag:<30}  {ppl_str:>10}  {wall_str:>8}")
+
+        print("-" * 60)
+        print(f"Results saved in: {RESULTS_DIR}")
+
+    cleanup_distributed()
 
 
 if __name__ == "__main__":
