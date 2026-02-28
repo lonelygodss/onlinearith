@@ -30,6 +30,8 @@ from transformers.models.qwen3.modular_qwen3 import (
     _FP8_E4M3_MAX, _FP4_E2M1_MAX, _FP6_E2M3_MAX, _FP6_E3M2_MAX,
     _FP4_E2M1_GRID_LIST, _FP6_E2M3_GRID_LIST, _FP6_E3M2_GRID_LIST,
     _nearest_on_grid, _get_grid,
+    _msd_truncate, _compute_inter_block_delays, _compute_intra_block_delays,
+    MSDComputeContext, _MXFPLinearBase,
 )
 
 BLOCK = 8
@@ -221,6 +223,229 @@ def _qfp6e3m2(x):
     return _nearest_on_grid(x.reshape(-1), grid).view(x.shape)
 
 
+# ── MSD-specific tests ────────────────────────────────────────────────────────
+
+class _CfgFP8_MSD:
+    """Config stub for MXFP8 with MSD truncation enabled."""
+    use_mxfp8 = True; mxfp8_block_size = BLOCK
+    use_mxfp6 = False; use_mxfp4 = False
+    use_msd_truncation = True; msd_cycle_budget = 16
+    msd_online_delay = 2; msd_budget_dynamic_scale = 1.0
+    msd_budget_dynamic_threshold = 0.0; msd_budget_dynamic_mode = "linear"
+    msd_deep_pipeline = False; msd_pipeline_precision_loss = 2
+    msd_calibration_data = None
+
+
+def _make_msd_layer(budget=16):
+    """Create an MXFP8Linear with MSD config at given budget."""
+    class Cfg(_CfgFP8_MSD):
+        msd_cycle_budget = budget
+    layer = MXFP8Linear(IN, OUT, bias=False, config=Cfg())
+    layer._msd_config = Cfg()
+    layer.layer_name = "test_layer"
+    nn.init.normal_(layer.weight)
+    return layer
+
+
+def test_msd_truncate_basic():
+    """Known-answer tests for _msd_truncate."""
+    print(f"\n{'─'*55}")
+    print("  MSD Truncation Primitive")
+    print(f"{'─'*55}")
+
+    # 7.0 = 0b111.0 = 3 significant bits. Truncate to 2 digits -> 6.0
+    val = torch.tensor([7.0])
+    result = _msd_truncate(val, torch.tensor([2.0]))
+    assert abs(result.item() - 6.0) < 1e-6, f"truncate(7.0, 2) = {result.item()}, expected 6.0"
+    print("[PASS] truncate(7.0, 2) = 6.0")
+
+    # 0.0 -> always 0.0 regardless of num_digits
+    result = _msd_truncate(torch.tensor([0.0]), torch.tensor([10.0]))
+    assert result.item() == 0.0, f"truncate(0.0, 10) = {result.item()}"
+    print("[PASS] truncate(0.0, *) = 0.0")
+
+    # num_digits=0 -> 0.0
+    result = _msd_truncate(torch.tensor([42.0]), torch.tensor([0.0]))
+    assert result.item() == 0.0, f"truncate(42.0, 0) = {result.item()}"
+    print("[PASS] truncate(*, 0) = 0.0")
+
+    # Negative values: -7.0 truncated to 2 digits -> -6.0
+    result = _msd_truncate(torch.tensor([-7.0]), torch.tensor([2.0]))
+    assert abs(result.item() - (-6.0)) < 1e-6, f"truncate(-7.0, 2) = {result.item()}"
+    print("[PASS] truncate(-7.0, 2) = -6.0")
+
+    # Large num_digits: should be near-lossless
+    result = _msd_truncate(torch.tensor([3.14159]), torch.tensor([23.0]))
+    assert abs(result.item() - 3.14159) < 1e-5, f"truncate(pi, 23) = {result.item()}"
+    print("[PASS] truncate(pi, 23) ≈ pi (near-lossless)")
+
+    # Batch test: shape preserved
+    vals = torch.randn(4, 8)
+    digits = torch.full((4, 8), 10.0)
+    result = _msd_truncate(vals, digits)
+    assert result.shape == (4, 8), f"batch shape: {result.shape}"
+    print("[PASS] batch shape preserved")
+
+
+def test_inter_block_delays():
+    """Test inter-block delay computation."""
+    print(f"\n{'─'*55}")
+    print("  Inter-Block Delays")
+    print(f"{'─'*55}")
+
+    N, out, nb = 2, 3, 4
+    # Create scales with known pattern: one block has much larger scale
+    x_scales = torch.tensor([[1.0, 0.5, 0.25, 0.125],
+                              [2.0, 1.0, 0.5,  0.25]])   # (N=2, nb=4)
+    w_scales = torch.tensor([[1.0, 0.5, 0.25, 0.125],
+                              [4.0, 2.0, 1.0,  0.5],
+                              [0.5, 0.25, 0.125, 0.0625]]) # (out=3, nb=4)
+
+    delays, e_max = _compute_inter_block_delays(w_scales, x_scales)
+
+    assert delays.shape == (N, out, nb), f"delay shape: {delays.shape}"
+    print(f"[PASS] inter-block delay shape = {tuple(delays.shape)}")
+
+    # All delays should be >= 0
+    assert (delays >= 0).all(), "negative delays found"
+    print("[PASS] all delays >= 0")
+
+    # For each (n, out_ch), the block with max combined scale should have delay=0
+    assert (delays.amin(dim=-1) == 0).all(), "min delay per (n,out) should be 0"
+    print("[PASS] min delay per output = 0 (max-scale block has no delay)")
+
+    # e_max shape
+    assert e_max.shape == (N, out), f"e_max shape: {e_max.shape}"
+    print(f"[PASS] e_max shape = {tuple(e_max.shape)}")
+
+
+def test_intra_block_delays():
+    """Test intra-block delay computation."""
+    print(f"\n{'─'*55}")
+    print("  Intra-Block Delays")
+    print(f"{'─'*55}")
+
+    N, nb, bs = 2, 3, 4
+    # Create blocks with known exponent pattern
+    x_q = torch.tensor([
+        [[8.0, 4.0, 2.0, 1.0],   # exponents: 3, 2, 1, 0 -> delays: 0, 1, 2, 3
+         [1.0, 1.0, 1.0, 1.0],   # all same -> delays: 0, 0, 0, 0
+         [16.0, 0.0, 1.0, 0.5]], # zeros get large delay
+        [[4.0, 2.0, 1.0, 0.5],
+         [0.0, 0.0, 0.0, 0.0],   # all zeros -> large delays
+         [1.0, 0.5, 0.25, 0.125]]
+    ])
+
+    delays = _compute_intra_block_delays(x_q)
+
+    assert delays.shape == (N, nb, bs), f"delay shape: {delays.shape}"
+    print(f"[PASS] intra-block delay shape = {tuple(delays.shape)}")
+
+    # First block, first sample: [8, 4, 2, 1] -> exps [3, 2, 1, 0] -> delays [0, 1, 2, 3]
+    expected = torch.tensor([0.0, 1.0, 2.0, 3.0])
+    assert torch.allclose(delays[0, 0], expected), f"delays[0,0] = {delays[0, 0]}, expected {expected}"
+    print("[PASS] delays for [8,4,2,1] = [0,1,2,3]")
+
+    # Second block, first sample: all 1.0 -> all same exponent -> all delay=0
+    assert (delays[0, 1] == 0).all(), f"delays[0,1] = {delays[0, 1]}"
+    print("[PASS] uniform block has all-zero delays")
+
+
+def test_msd_budget_infinity():
+    """With infinite budget, MSD result should match exact MX result."""
+    print(f"\n{'─'*55}")
+    print("  MSD Budget=∞ (near-lossless)")
+    print(f"{'─'*55}")
+
+    torch.manual_seed(123)
+    layer_msd = _make_msd_layer(budget=999)
+    # Also make an exact (non-MSD) layer with same weights
+    layer_exact = MXFP8Linear(IN, OUT, bias=False, config=_CfgFP8())
+    layer_exact.weight.data.copy_(layer_msd.weight.data)
+
+    x = torch.randn(8, IN)
+
+    y_msd = layer_msd(x).detach()
+    y_exact = layer_exact(x).detach()
+
+    err = (y_msd - y_exact).abs()
+    signal_power = y_exact.pow(2).mean()
+    noise_power = err.pow(2).mean()
+    snr_db = 10 * math.log10((signal_power / noise_power).item()) if noise_power > 0 else float("inf")
+
+    assert snr_db > 60.0, f"SNR with B=999 should be >60 dB, got {snr_db:.1f} dB"
+    print(f"[PASS] B=999 SNR = {snr_db:.1f} dB (>60 dB, near-lossless)")
+
+
+def test_msd_budget_zero():
+    """With budget=0, all products should be truncated to zero."""
+    print(f"\n{'─'*55}")
+    print("  MSD Budget=0 (all-zero output)")
+    print(f"{'─'*55}")
+
+    torch.manual_seed(456)
+    layer = _make_msd_layer(budget=0)
+    x = torch.randn(4, IN)
+    y = layer(x).detach()
+
+    max_abs = y.abs().max().item()
+    assert max_abs < 1e-10, f"B=0 output max_abs = {max_abs}, expected ~0"
+    print(f"[PASS] B=0 output max_abs = {max_abs:.2e} (effectively zero)")
+
+
+def test_msd_budget_sweep_monotonic():
+    """Error should decrease (or stay same) as budget increases."""
+    print(f"\n{'─'*55}")
+    print("  MSD Budget Sweep (monotonic error decrease)")
+    print(f"{'─'*55}")
+
+    torch.manual_seed(789)
+    # Reference: exact MX layer
+    layer_exact = MXFP8Linear(IN, OUT, bias=False, config=_CfgFP8())
+    nn.init.normal_(layer_exact.weight)
+    x = torch.randn(16, IN)
+    y_exact = layer_exact(x).detach()
+
+    budgets = [4, 8, 12, 16, 24, 32]
+    errors = []
+
+    for b in budgets:
+        layer_msd = _make_msd_layer(budget=b)
+        layer_msd.weight.data.copy_(layer_exact.weight.data)
+        y_msd = layer_msd(x).detach()
+        mse = (y_exact - y_msd).pow(2).mean().item()
+        errors.append(mse)
+        print(f"  B={b:3d}  MSE={mse:.6f}")
+
+    # Check monotonic decrease (allow small tolerance for numerical noise)
+    for i in range(1, len(errors)):
+        assert errors[i] <= errors[i-1] + 1e-8, \
+            f"Error increased: B={budgets[i-1]}→{budgets[i]}, MSE {errors[i-1]:.6f}→{errors[i]:.6f}"
+
+    print(f"[PASS] error monotonically decreases with budget: {errors[0]:.6f} → {errors[-1]:.6f}")
+
+
+def test_calibration_import():
+    """Test that calibration module can be imported and has expected functions."""
+    print(f"\n{'─'*55}")
+    print("  Calibration Module Import")
+    print(f"{'─'*55}")
+
+    from transformers.models.qwen3.calibration_msd import (
+        calibrate_channel_budgets,
+        apply_calibration_to_config,
+        _compute_block_delay_stats,
+        _find_budget_for_snr,
+    )
+
+    assert callable(calibrate_channel_budgets), "calibrate_channel_budgets not callable"
+    assert callable(apply_calibration_to_config), "apply_calibration_to_config not callable"
+    assert callable(_compute_block_delay_stats), "_compute_block_delay_stats not callable"
+    assert callable(_find_budget_for_snr), "_find_budget_for_snr not callable"
+    print("[PASS] Calibration module imports successfully")
+    print("[PASS] All calibration functions are callable")
+
+
 # ── main ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -237,6 +462,16 @@ if __name__ == "__main__":
     test_fp4_grid()
     test_fp6_grids()
     test_nearest_on_grid()
+
+    # ── MSD-specific tests ──────────────────────────────────────────────────
+    print()
+    test_msd_truncate_basic()
+    test_inter_block_delays()
+    test_intra_block_delays()
+    test_msd_budget_infinity()
+    test_msd_budget_zero()
+    test_msd_budget_sweep_monotonic()
+    test_calibration_import()
 
     print("=" * 55)
     print("All tests passed.")
