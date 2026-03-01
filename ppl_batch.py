@@ -399,21 +399,58 @@ def main():
         print(f"{'ID':>3}  {'Tag':<30}  {'PPL':>10}  {'Time':>8}")
         print("-" * 60)
 
-        for sid, tag, desc, _ in run_setups:
+        summary_rows = []
+        for sid, tag, desc, overrides in run_setups:
             result_file = RESULTS_DIR / f"ppl_results_{tag}.json"
             if result_file.exists():
                 with open(result_file) as f:
                     res = json.load(f)
-                ppl = res.get("metrics", {}).get("token_perplexity", "?")
-                wall = res.get("performance", {}).get("wall_time_sec", "?")
-                ppl_str = f"{ppl:.4f}" if isinstance(ppl, float) else str(ppl)
+                metrics = res.get("metrics", {})
+                perf    = res.get("performance", {})
+                ppl  = metrics.get("token_perplexity", "?")
+                wall = perf.get("wall_time_sec", "?")
+                ppl_str  = f"{ppl:.4f}" if isinstance(ppl, float) else str(ppl)
                 wall_str = f"{wall:.0f}s" if isinstance(wall, (int, float)) else str(wall)
+                summary_rows.append({
+                    "id": sid, "tag": tag, "description": desc,
+                    "token_perplexity": metrics.get("token_perplexity"),
+                    "word_perplexity":  metrics.get("word_perplexity"),
+                    "bits_per_byte":    metrics.get("bits_per_byte"),
+                    "bits_per_char":    metrics.get("bits_per_char"),
+                    "mean_nll_nats":    metrics.get("mean_nll_nats"),
+                    "wall_time_sec":    perf.get("wall_time_sec"),
+                    "peak_memory":      perf.get("peak_memory"),
+                    "status": "ok",
+                })
             else:
                 ppl_str = "MISSING"
                 wall_str = "-"
+                summary_rows.append({
+                    "id": sid, "tag": tag, "description": desc,
+                    "status": "missing",
+                })
             print(f"{sid:3d}  {tag:<30}  {ppl_str:>10}  {wall_str:>8}")
 
         print("-" * 60)
+
+        # ── Save consolidated summary JSON ──
+        from datetime import datetime, timezone
+        summary_file = RESULTS_DIR / "ppl_batch_summary.json"
+        summary = {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "model": MODEL_PATH,
+            "dataset": "/".join(DATASET),
+            "eval_config": {"max_length": MAX_LENGTH, "stride": STRIDE,
+                            "dtype": str(dtype)},
+            "world_size": world_size,
+            "total_wall_time_sec": round(total_elapsed, 2),
+            "setups_requested": len(run_setups),
+            "setups_completed": sum(1 for r in summary_rows if r["status"] == "ok"),
+            "results": summary_rows,
+        }
+        with open(summary_file, "w") as f:
+            json.dump(summary, f, indent=2)
+        print(f"Summary saved to: {summary_file.name}")
         print(f"Results saved in: {RESULTS_DIR}")
 
     cleanup_distributed()

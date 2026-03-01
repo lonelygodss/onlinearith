@@ -325,6 +325,8 @@ The 21 setups cover:
 - **#20-21**: Deep pipeline (MXFP8, MXFP4)
 
 All result files are named `ppl_results_{tag}.json` and saved in the `onlinearith/` directory.
+At the end of each batch run, a consolidated **`ppl_batch_summary.json`** is written by rank 0
+containing all metrics, wall times, and run metadata in a single file for easy post-processing.
 
 **Tip:** Run inside `tmux` or `screen` so it survives SSH disconnections:
 ```bash
@@ -543,4 +545,5 @@ When `msd_deep_pipeline=true`, precision is tracked through the MLP stages:
 | `benchmarktest.py` | lm-eval harness (MMLU, GSM8K) |
 | `visualization.py` | Chart generation from benchmark JSON results |
 | `calibrate.py` | (create from Section 5 snippet) Offline budget calibration |
-| `ppl_results_*.json` | Saved PPL evaluation results |
+| `ppl_results_*.json` | Saved PPL evaluation results (one per setup) |
+| `ppl_batch_summary.json` | Consolidated batch summary with all metrics |
