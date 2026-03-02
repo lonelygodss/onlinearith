@@ -17,6 +17,9 @@ by patching config fields in-memory.  Each run's results are saved to
 
 Skips setups whose result file already exists (resume-safe).
 
+Todo: Add autmatic load ballancing before the batch run, detect which gpus are free and 
+assign more setups to them.  For now, just assign round-robin and let the user manually re-run any stragglers.
+
 Usage:
     cd /home/xzj/coding/onlinearith
     torchrun --nproc_per_node=8 ppl_batch.py                 # run all setups
@@ -39,9 +42,9 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from dist_utils import (
-    barrier,
     cleanup_distributed,
-    init_distributed,
+    file_barrier,
+    init_distributed_lite,
     is_main,
 )
 
@@ -161,6 +164,37 @@ _BASELINE_OVERRIDES = {
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+def reconfigure_mlp_layers(model, device):
+    """
+    Replace every MLP linear layer with the correct type for the current config.
+
+    ``_make_linear()`` is called at model construction and bakes in the linear
+    class (MXFP8Linear, MXFP6Linear, MXFP4Linear, or nn.Linear).  Changing
+    ``model.config`` later does NOT change the existing layer objects.  This
+    function walks all MLP modules and rebuilds the three projections to
+    match the current config, sharing the weight tensor so no data is copied.
+    """
+    from transformers.models.qwen3.modeling_qwen3 import _make_linear, Qwen3MLP
+
+    config = model.config
+    for module in model.modules():
+        if not isinstance(module, Qwen3MLP):
+            continue
+        for attr in ("gate_proj", "up_proj", "down_proj"):
+            old = getattr(module, attr)
+            new = _make_linear(old.in_features, old.out_features, config)
+            new.weight = old.weight  # share the nn.Parameter (no copy)
+            if hasattr(old, "bias_param") and old.bias_param is not None:
+                new.bias_param = old.bias_param
+            new = new.to(device)
+            setattr(module, attr, new)
+
+    # Invalidate MSD context so it re-walks modules & re-sets layer_name etc.
+    if hasattr(model, "_msd_context"):
+        model._msd_context = None
+        model._msd_context_config_hash = None
+
+
 def peak_memory_str(device):
     if device.type == "cuda":
         return f"{torch.cuda.max_memory_allocated(device) / 1024**3:.2f} GB"
@@ -253,8 +287,8 @@ def main():
                         help="Re-run even if result file already exists")
     args = parser.parse_args()
 
-    # ── Distributed init ──
-    rank, world_size, local_rank, device = init_distributed()
+    # ── Distributed init (no NCCL — ranks work independently) ──
+    rank, world_size, local_rank, device = init_distributed_lite()
     dtype = torch.float16 if device.type == "cuda" else torch.float32
 
     # ── List mode (rank 0 only, then exit) ──
@@ -321,8 +355,6 @@ def main():
         print(f"Tokens: {seq_len:,}  |  Words: {num_words:,}")
         print()
 
-    barrier()
-
     # ── Run assigned setups ──
     local_summary = []
     total_start = time.perf_counter()
@@ -347,10 +379,8 @@ def main():
         apply_config(model.config, _BASELINE_OVERRIDES)
         apply_config(model.config, overrides)
 
-        # Invalidate cached MSD context so it gets re-created
-        if hasattr(model, "_msd_context"):
-            model._msd_context = None
-            model._msd_context_config_hash = None
+        # Rebuild MLP linear layers to match the new config flags
+        reconfigure_mlp_layers(model, device)
 
         # Show active config
         active_flags = []
@@ -386,8 +416,8 @@ def main():
 
     local_elapsed = time.perf_counter() - total_start
 
-    # ── Wait for all ranks to finish ──
-    barrier()
+    # ── Wait for all ranks to finish (file-based, no NCCL timeout) ──
+    file_barrier(rank, world_size, RESULTS_DIR)
     total_elapsed = time.perf_counter() - total_start
 
     # ── Summary (rank 0 reads all result files) ──
