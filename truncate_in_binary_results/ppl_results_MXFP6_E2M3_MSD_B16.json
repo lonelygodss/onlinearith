@@ -1,0 +1,45 @@
+{
+  "metrics": {
+    "token_perplexity": 17.5101,
+    "word_perplexity": 34.7981,
+    "bits_per_byte": 0.9528,
+    "bits_per_char": 0.9543,
+    "mean_nll_nats": 2.8628
+  },
+  "reliability": {
+    "num_chunks": 578,
+    "chunk_nll_mean": 2.8637,
+    "chunk_nll_std": 0.4342,
+    "scored_tokens": 299078
+  },
+  "performance": {
+    "throughput_tokens_per_sec": 4.6,
+    "wall_time_sec": 65510.39,
+    "peak_memory": "20.29 GB"
+  },
+  "setup": {
+    "id": 7,
+    "tag": "MXFP6_E2M3_MSD_B16",
+    "description": "MXFP6 E2M3 + MSD B=16",
+    "config_overrides": {
+      "use_mxfp6": true,
+      "mxfp6_format": "e2m3",
+      "use_msd_truncation": true,
+      "msd_cycle_budget": 16,
+      "msd_online_delay": 2,
+      "msd_budget_dynamic_scale": 1.0,
+      "msd_budget_dynamic_threshold": 0.0,
+      "msd_budget_dynamic_mode": "linear",
+      "msd_deep_pipeline": false,
+      "msd_pipeline_precision_loss": 2,
+      "msd_calibration_data": null
+    }
+  },
+  "model": "../Qwen3-0.6B",
+  "dataset": "wikitext/wikitext-2-raw-v1/test",
+  "config": {
+    "max_length": 4096,
+    "stride": 512,
+    "dtype": "torch.float16"
+  }
+}

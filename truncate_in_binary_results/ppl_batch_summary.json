@@ -1,0 +1,42 @@
+{
+  "generated_at": "2026-03-04T03:17:18.111037+00:00",
+  "model": "../Qwen3-0.6B",
+  "dataset": "wikitext/wikitext-2-raw-v1/test",
+  "eval_config": {
+    "max_length": 4096,
+    "stride": 512,
+    "dtype": "torch.float16"
+  },
+  "world_size": 2,
+  "total_wall_time_sec": 65535.44,
+  "setups_requested": 2,
+  "setups_completed": 2,
+  "results": [
+    {
+      "id": 18,
+      "tag": "MXFP4_MSD_B24",
+      "description": "MXFP4 + MSD B=24",
+      "token_perplexity": 20.7013,
+      "word_perplexity": 42.826,
+      "bits_per_byte": 1.0086,
+      "bits_per_char": 1.0101,
+      "mean_nll_nats": 3.0302,
+      "wall_time_sec": 65535.43,
+      "peak_memory": "20.29 GB",
+      "status": "ok"
+    },
+    {
+      "id": 19,
+      "tag": "MXFP4_MSD_B32",
+      "description": "MXFP4 + MSD B=32",
+      "token_perplexity": 20.7013,
+      "word_perplexity": 42.826,
+      "bits_per_byte": 1.0086,
+      "bits_per_char": 1.0101,
+      "mean_nll_nats": 3.0302,
+      "wall_time_sec": 65510.82,
+      "peak_memory": "20.29 GB",
+      "status": "ok"
+    }
+  ]
+}
