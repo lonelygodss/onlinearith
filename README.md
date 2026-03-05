@@ -211,7 +211,7 @@ cd /home/xzj/coding/onlinearith
 source /home/xzj/coding/.venv3_10/bin/activate
 
 # Single PPL evaluation — 8 GPUs, ~7-8x speedup
-torchrun --nproc_per_node=8 ppltest.py
+torchrun --nproc_per_node=8 ppltest.py --setup 2
 
 # Full 21-config sweep — 8 GPUs, ~3x speedup
 torchrun --nproc_per_node=8 ppl_batch.py
@@ -219,10 +219,53 @@ torchrun --nproc_per_node=8 ppl_batch.py
 # Subset of configs on 8 GPUs
 torchrun --nproc_per_node=8 ppl_batch.py --only 2 6 10
 
+# Use only specific GPUs (e.g. GPUs 0, 2, 5 — when others are busy)
+torchrun --nproc_per_node=3 ppltest.py --gpus 0,2,5 --setup 6
+torchrun --nproc_per_node=3 ppl_batch.py --gpus 0,2,5
+
+# List all predefined setups (works for both scripts)
+python ppltest.py --list
+python ppl_batch.py --list
+
 # Single-GPU fallback (unchanged behavior, no torchrun needed)
-python ppltest.py
+python ppltest.py --setup 1
 python ppl_batch.py
+
+# Single specific GPU (e.g. only GPU 3 is free)
+python ppltest.py --gpus 3 --setup 6
+python ppl_batch.py --gpus 3
 ```
+
+### GPU Selection
+
+On a shared server, some GPUs may be in use by other users. Use `--gpus` to
+restrict which physical GPUs are used:
+
+```bash
+# 1. Check which GPUs are idle
+nvidia-smi   # or nvtop
+
+# 2. Suppose GPUs 0, 3, 7 are free — use only those
+torchrun --nproc_per_node=3 ppl_batch.py --gpus 0,3,7
+
+# For single-GPU mode, just specify one GPU
+python ppltest.py --gpus 3
+```
+
+**Important:** When using `torchrun`, `--nproc_per_node` must **equal** the
+number of GPU IDs in `--gpus`. A mismatch will produce a clear error message.
+
+The `--gpus` flag sets `CUDA_VISIBLE_DEVICES` internally before any CUDA
+context is created. You can also set the environment variable directly if
+you prefer:
+
+```bash
+# Equivalent to --gpus 0,3,7
+CUDA_VISIBLE_DEVICES=0,3,7 torchrun --nproc_per_node=3 ppl_batch.py
+```
+
+If both `--gpus` and `CUDA_VISIBLE_DEVICES` are provided, `--gpus` takes
+precedence (it overwrites the env var).
 
 ### Parallelism Strategy
 
@@ -236,20 +279,34 @@ The `MSDComputeContext._active` class-level singleton is **process-safe** under 
 
 ### Procedure (Single Setup)
 
-1. **Edit `Qwen3-0.6B/config.json`** with the desired setup (see Section 2).
+`ppltest.py` supports the same 21 predefined setups as `ppl_batch.py`, selected
+via `--setup ID`. The setup ID numbering is identical across both scripts.
 
-2. **Set the output filename** in `ppltest.py`:
-   ```python
-   RESULTS_OUT = "ppl_results_MXFP8_MSD_B16.json"  # descriptive name
+1. **List available setups:**
+   ```bash
+   python ppltest.py --list
    ```
 
-3. **Run:**
+2. **Run a setup by ID:**
    ```bash
    # Multi-GPU (recommended)
-   torchrun --nproc_per_node=8 ppltest.py
+   torchrun --nproc_per_node=8 ppltest.py --setup 6      # MXFP8 + MSD B=16
+
+   # Use specific GPUs only
+   torchrun --nproc_per_node=3 ppltest.py --gpus 0,2,5 --setup 6
 
    # Single-GPU fallback
-   python ppltest.py
+   python ppltest.py --setup 6
+   ```
+   The output file is auto-named `ppl_results_{tag}.json` from the setup tag.
+   Use `--output custom_name.json` to override.
+
+3. **Advanced: custom config.json (no --setup):**
+   If `--setup` is omitted, `ppltest.py` uses whatever config is in
+   `Qwen3-0.6B/config.json` and saves to the hardcoded `RESULTS_OUT` constant.
+   ```bash
+   # Edit config.json first, then:
+   torchrun --nproc_per_node=8 ppltest.py
    ```
 
 4. **Expected runtime:**
@@ -306,6 +363,12 @@ torchrun --nproc_per_node=8 ppl_batch.py
 # Run only specific setups by ID
 torchrun --nproc_per_node=8 ppl_batch.py --only 1 6 10 14
 
+# Run on specific GPUs (e.g. 0, 2, 5 are idle)
+torchrun --nproc_per_node=3 ppl_batch.py --gpus 0,2,5
+
+# Combine GPU selection with setup filtering
+torchrun --nproc_per_node=3 ppl_batch.py --gpus 0,2,5 --only 1 6 10
+
 # Re-run setups even if result files exist
 torchrun --nproc_per_node=8 ppl_batch.py --force
 
@@ -314,6 +377,9 @@ torchrun --nproc_per_node=8 ppl_batch.py
 
 # Single-GPU fallback (all of the above also work with plain python)
 python ppl_batch.py
+
+# Single specific GPU
+python ppl_batch.py --gpus 3
 ```
 
 The 21 setups cover:
@@ -331,7 +397,7 @@ containing all metrics, wall times, and run metadata in a single file for easy p
 **Tip:** Run inside `tmux` or `screen` so it survives SSH disconnections:
 ```bash
 tmux new -s ppl
-torchrun --nproc_per_node=8 ppl_batch.py
+torchrun --nproc_per_node=3 ppl_batch.py --gpus 0,2,5
 # Ctrl+B then D to detach; tmux attach -t ppl to reconnect
 ```
 

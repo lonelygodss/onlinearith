@@ -26,7 +26,9 @@ Usage:
     torchrun --nproc_per_node=8 ppl_batch.py --list          # list setups (rank 0)
     torchrun --nproc_per_node=8 ppl_batch.py --only 1 6 10   # run only selected
     torchrun --nproc_per_node=8 ppl_batch.py --force         # re-run even if done
+    torchrun --nproc_per_node=3 ppl_batch.py --gpus 0,2,5    # use specific GPUs
     python ppl_batch.py                                       # single-GPU fallback
+    python ppl_batch.py --gpus 3                              # single specific GPU
 """
 
 import argparse
@@ -46,6 +48,7 @@ from dist_utils import (
     file_barrier,
     init_distributed_lite,
     is_main,
+    restrict_gpus,
 )
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -285,7 +288,11 @@ def main():
                         help="Run only these setup IDs (e.g. --only 1 6 10)")
     parser.add_argument("--force", action="store_true",
                         help="Re-run even if result file already exists")
+    parser.add_argument("--gpus", type=str, default=None,
+                        help="Comma-separated physical GPU IDs to use, e.g. '0,2,5'. "
+                             "Must match --nproc_per_node when using torchrun.")
     args = parser.parse_args()
+    restrict_gpus(args.gpus)
 
     # ── Distributed init (no NCCL — ranks work independently) ──
     rank, world_size, local_rank, device = init_distributed_lite()

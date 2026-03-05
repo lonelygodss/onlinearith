@@ -24,6 +24,44 @@ import torch
 import torch.distributed as dist
 
 
+def restrict_gpus(gpu_ids: str | None) -> int:
+    """
+    Restrict CUDA visibility to specific physical GPUs.
+
+    Must be called **before** any CUDA context is created (i.e. before
+    ``init_distributed`` / ``init_distributed_lite`` and before any
+    ``torch.cuda.*`` calls).
+
+    Args:
+        gpu_ids: Comma-separated physical GPU IDs, e.g. ``"0,2,5"``.
+                 If *None*, no restriction is applied.
+
+    Returns:
+        Number of GPUs that will be visible (after restriction, or total
+        available if *gpu_ids* is None).
+
+    Example::
+
+        restrict_gpus("0,2,5")          # only GPUs 0, 2, 5 visible
+        restrict_gpus(None)              # no-op, use all GPUs
+    """
+    if gpu_ids is None:
+        return torch.cuda.device_count()
+
+    # Validate format: comma-separated non-negative integers
+    ids = [s.strip() for s in gpu_ids.split(",") if s.strip()]
+    for tok in ids:
+        if not tok.isdigit():
+            raise ValueError(
+                f"--gpus: expected comma-separated integers, got {gpu_ids!r}"
+            )
+
+    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(ids)
+    # After setting the env var, PyTorch will see len(ids) devices
+    # numbered 0 .. len(ids)-1.
+    return len(ids)
+
+
 def init_distributed():
     """
     Initialise torch.distributed from torchrun env vars.
@@ -38,6 +76,13 @@ def init_distributed():
         rank = int(os.environ["RANK"])
         world_size = int(os.environ["WORLD_SIZE"])
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        n_visible = torch.cuda.device_count()
+        if local_rank >= n_visible:
+            raise RuntimeError(
+                f"LOCAL_RANK={local_rank} but only {n_visible} GPU(s) visible. "
+                f"If using --gpus, ensure --nproc_per_node matches the number "
+                f"of GPU IDs provided."
+            )
         torch.cuda.set_device(local_rank)
         dist.init_process_group(backend="nccl")
         device = torch.device(f"cuda:{local_rank}")
@@ -64,6 +109,13 @@ def init_distributed_lite():
         rank = int(os.environ["RANK"])
         world_size = int(os.environ["WORLD_SIZE"])
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        n_visible = torch.cuda.device_count()
+        if local_rank >= n_visible:
+            raise RuntimeError(
+                f"LOCAL_RANK={local_rank} but only {n_visible} GPU(s) visible. "
+                f"If using --gpus, ensure --nproc_per_node matches the number "
+                f"of GPU IDs provided."
+            )
         torch.cuda.set_device(local_rank)
         device = torch.device(f"cuda:{local_rank}")
         return rank, world_size, local_rank, device

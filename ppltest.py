@@ -4,6 +4,13 @@ Perplexity (PPL) evaluation script with richer metrics and reliable computation.
 Supports **multi-GPU** via torchrun:
     torchrun --nproc_per_node=8 ppltest.py        # 8-GPU parallel
     python ppltest.py                              # single-GPU fallback
+    torchrun --nproc_per_node=3 ppltest.py --gpus 0,2,5   # specific GPUs
+    python ppltest.py --gpus 3                             # single specific GPU
+
+Predefined setups (same numbering as ppl_batch.py):
+    python ppltest.py --list                               # list all setups
+    python ppltest.py --setup 6                            # MXFP8 + MSD B=16
+    torchrun --nproc_per_node=3 ppltest.py --gpus 0,2,5 --setup 2
 
 Each GPU loads a full model copy and processes a shard of the 578 sliding
 windows.  Partial NLL sums are aggregated via NCCL all_reduce.
@@ -26,6 +33,7 @@ Fix vs. original script:
 import os
 os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 
+import argparse
 import json
 import math
 import time
@@ -44,6 +52,13 @@ from dist_utils import (
     gather_list,
     init_distributed,
     is_main,
+    restrict_gpus,
+)
+from ppl_batch import (
+    SETUPS,
+    _BASELINE_OVERRIDES,
+    apply_config,
+    reconfigure_mlp_layers,
 )
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -88,14 +103,51 @@ def precompute_windows(seq_len: int, max_length: int, stride: int):
 
 
 def main():
-    # ── 0. Distributed init ──────────────────────────────────────────────────
+    # ── 0. Parse args & setup selection ──────────────────────────────────────
+    parser = argparse.ArgumentParser(description="Perplexity evaluation (single setup)")
+    parser.add_argument("--gpus", type=str, default=None,
+                        help="Comma-separated physical GPU IDs to use, e.g. '0,2,5'. "
+                             "Must match --nproc_per_node when using torchrun.")
+    parser.add_argument("--setup", type=int, default=None, metavar="ID",
+                        help="Use a predefined setup by ID (same numbering as ppl_batch.py). "
+                             "See --list for available setups. If omitted, uses config.json as-is.")
+    parser.add_argument("--list", action="store_true",
+                        help="List all predefined setups and exit")
+    parser.add_argument("--output", type=str, default=None, metavar="FILE",
+                        help="Override output JSON filename "
+                             "(default: auto-generated from setup tag, "
+                             "or RESULTS_OUT constant if --setup is not used)")
+    args = parser.parse_args()
+
+    # ── List mode (no GPU needed) ──
+    if args.list:
+        print(f"{'ID':>3}  {'Tag':<30}  Description")
+        print("-" * 75)
+        for sid, tag, desc, _ in SETUPS:
+            result_file = Path(__file__).parent / f"ppl_results_{tag}.json"
+            exists = "  (done)" if result_file.exists() else ""
+            print(f"{sid:3d}  {tag:<30}  {desc}{exists}")
+        return
+
+    # ── Validate --setup ──
+    selected_setup = None
+    if args.setup is not None:
+        selected_setup = next((s for s in SETUPS if s[0] == args.setup), None)
+        if selected_setup is None:
+            print(f"Unknown setup ID: {args.setup}. "
+                  f"Valid IDs: {[s[0] for s in SETUPS]}. Use --list to see all.")
+            return
+
+    restrict_gpus(args.gpus)
+
+    # ── 1. Distributed init ──────────────────────────────────────────────────
     rank, world_size, local_rank, device = init_distributed()
     dtype = torch.float16 if device.type == "cuda" else torch.float32
 
     if is_main(rank):
         print(f"World size: {world_size}  |  Device: {device}  |  dtype: {dtype}")
 
-    # ── 1. Load model ────────────────────────────────────────────────────────
+    # ── 2. Load model ─────────────────────────────────────────────────────
     if is_main(rank):
         print("Loading tokenizer & model ...")
 
@@ -112,7 +164,31 @@ def main():
         num_params = sum(p.numel() for p in model.parameters())
         print(f"Model: {MODEL_PATH}  |  Params: {num_params/1e6:.1f}M")
 
-    # ── 2. Load & encode dataset ─────────────────────────────────────────────
+    # ── 3. Apply setup config (if --setup given) ─────────────────────────────
+    if selected_setup is not None:
+        sid, tag, desc, overrides = selected_setup
+        apply_config(model.config, _BASELINE_OVERRIDES)
+        apply_config(model.config, overrides)
+        reconfigure_mlp_layers(model, device)
+        if is_main(rank):
+            active_flags = []
+            for k in ["use_mxfp8", "use_mxfp6", "use_mxfp4", "use_msd_truncation",
+                       "msd_cycle_budget", "msd_deep_pipeline"]:
+                v = getattr(model.config, k, None)
+                if v is not None and v is not False:
+                    active_flags.append(f"{k}={v}")
+            print(f"Setup #{sid}: {desc}")
+            print(f"Config: {', '.join(active_flags) or '(baseline fp16)'}")
+
+    # Determine output filename
+    if args.output:
+        results_out = args.output
+    elif selected_setup is not None:
+        results_out = f"ppl_results_{selected_setup[1]}.json"
+    else:
+        results_out = RESULTS_OUT
+
+    # ── 4. Load & encode dataset ─────────────────────────────────────────
     ds_name, ds_config, ds_split = DATASET
     if is_main(rank):
         print(f"\nLoading dataset: {ds_name}/{ds_config} ({ds_split}) ...")
@@ -130,7 +206,7 @@ def main():
     if is_main(rank):
         print(f"Tokens: {seq_len:,}  |  Words: {num_words:,}  |  Chars: {num_chars:,}  |  Bytes: {num_bytes:,}")
 
-    # ── 3. Pre-compute & shard windows ───────────────────────────────────────
+    # ── 5. Pre-compute & shard windows ───────────────────────────────────────
     all_windows = precompute_windows(seq_len, MAX_LENGTH, STRIDE)
     my_windows = all_windows[rank::world_size]
 
@@ -140,7 +216,7 @@ def main():
 
     barrier()
 
-    # ── 4. Sliding-window PPL (distributed) ──────────────────────────────────
+    # ── 6. Sliding-window PPL (distributed) ──────────────────────────────────
     local_nll_sum  = 0.0
     local_tokens   = 0
     local_chunk_nlls = []
@@ -163,7 +239,7 @@ def main():
 
     elapsed = time.perf_counter() - t_start
 
-    # ── 5. Aggregate across ranks ────────────────────────────────────────────
+    # ── 7. Aggregate across ranks ────────────────────────────────────────────
     agg = torch.tensor([local_nll_sum, float(local_tokens)],
                        dtype=torch.float64, device=device)
     all_reduce_sum(agg)
@@ -173,7 +249,7 @@ def main():
     # Gather per-chunk NLLs for reliability stats (all -> rank 0)
     all_chunk_nlls = gather_list(local_chunk_nlls, rank, world_size)
 
-    # ── 6. Compute & report metrics (rank 0 only) ───────────────────────────
+    # ── 8. Compute & report metrics (rank 0 only) ───────────────────────────
     if is_main(rank):
         mean_nll = total_nll_sum / total_tokens
 
@@ -238,7 +314,7 @@ def main():
             },
         }
 
-        out_path = Path(__file__).parent / RESULTS_OUT
+        out_path = Path(__file__).parent / results_out
         with open(out_path, "w") as f:
             json.dump(results, f, indent=2)
         print(f"\nResults saved -> {out_path}")
