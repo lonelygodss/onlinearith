@@ -1,0 +1,44 @@
+{
+  "metrics": {
+    "token_perplexity": 17.4095,
+    "word_perplexity": 34.5505,
+    "bits_per_byte": 0.9509,
+    "bits_per_char": 0.9524,
+    "mean_nll_nats": 2.857
+  },
+  "reliability": {
+    "num_chunks": 578,
+    "chunk_nll_mean": 2.858,
+    "chunk_nll_std": 0.4335,
+    "scored_tokens": 299078
+  },
+  "performance": {
+    "throughput_tokens_per_sec": 4.6,
+    "wall_time_sec": 65533.84,
+    "peak_memory": "20.29 GB"
+  },
+  "setup": {
+    "id": 11,
+    "tag": "MXFP8_MSD_B12",
+    "description": "MXFP8 + MSD B=12",
+    "config_overrides": {
+      "use_mxfp8": true,
+      "use_msd_truncation": true,
+      "msd_cycle_budget": 12,
+      "msd_online_delay": 2,
+      "msd_budget_dynamic_scale": 1.0,
+      "msd_budget_dynamic_threshold": 0.0,
+      "msd_budget_dynamic_mode": "linear",
+      "msd_deep_pipeline": false,
+      "msd_pipeline_precision_loss": 2,
+      "msd_calibration_data": null
+    }
+  },
+  "model": "../Qwen3-0.6B",
+  "dataset": "wikitext/wikitext-2-raw-v1/test",
+  "config": {
+    "max_length": 4096,
+    "stride": 512,
+    "dtype": "torch.float16"
+  }
+}

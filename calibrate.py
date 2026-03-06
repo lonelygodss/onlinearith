@@ -1,46 +1,303 @@
-import sys
-sys.path.insert(0, "/home/xzjnew/coding/transformers/src")
+"""
+Offline MSD budget calibration across MXFP formats.
 
+Supports **multi-GPU** via torchrun (setup-level parallelism):
+    torchrun --nproc_per_node=4 calibrate.py              # all 4 formats on 4 GPUs
+    torchrun --nproc_per_node=2 calibrate.py --only 1 2   # subset on 2 GPUs
+    python calibrate.py --setup 1                          # single format, single GPU
+
+Each GPU loads its own model copy and calibrates its assigned format(s).
+Formats are partitioned round-robin across ranks; each rank writes its
+result file independently (no inter-rank communication during calibration).
+
+Output files:  calibration_{tag}.json  (e.g. calibration_MXFP8.json)
+
+Usage:
+    cd /home/xzj/coding/onlinearith
+    source /home/xzj/coding/.venv3_10/bin/activate
+
+    python calibrate.py --list                                # list setups
+    python calibrate.py --setup 1                             # single format
+    torchrun --nproc_per_node=4 calibrate.py                  # all 4 formats
+    torchrun --nproc_per_node=2 calibrate.py --gpus 0,3      # specific GPUs
+    torchrun --nproc_per_node=4 calibrate.py --target-snr 40  # custom SNR
+    torchrun --nproc_per_node=4 calibrate.py --force          # re-run existing
+"""
+
+import sys
+sys.path.insert(0, "/home/xzj/coding/transformers/src")
+
+import argparse
 import json
+import time
+from pathlib import Path
+
 import torch
+from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.models.qwen3.calibration_msd import calibrate_channel_budgets
 
-# 1. Load model with MXFP format enabled (MSD off for calibration)
-model_path = "/home/xzjnew/coding/Qwen3-0.6B"
-tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
-model = AutoModelForCausalLM.from_pretrained(
-    model_path, local_files_only=True, torch_dtype=torch.float16
+from dist_utils import (
+    cleanup_distributed,
+    file_barrier,
+    init_distributed_lite,
+    is_main,
+    restrict_gpus,
 )
-device = "cuda" if torch.cuda.is_available() else "cpu"
-model.to(device)
-model.eval()
-
-# 2. Prepare calibration texts (use a small diverse sample)
-from datasets import load_dataset
-ds = load_dataset("wikitext", "wikitext-2-raw-v1", split="validation")
-# Take ~20 non-empty paragraphs as calibration data
-cal_texts = [t for t in ds["text"] if len(t.strip()) > 100][:20]
-print(f"Calibration texts: {len(cal_texts)} paragraphs")
-
-# 3. Run calibration
-calibration_data = calibrate_channel_budgets(
-    model, tokenizer, cal_texts,
-    target_snr_db=30.0,    # Target SNR; try 20, 30, 40
-    max_length=512,
-    batch_size=4,
-    online_delay=2,
+from ppl_batch import (
+    _BASELINE_OVERRIDES,
+    apply_config,
+    reconfigure_mlp_layers,
 )
 
-# 4. Save calibrated config back to config.json
-config_path = f"{model_path}/config.json"
-with open(config_path, "r") as f:
-    cfg = json.load(f)
+# ── Constants ─────────────────────────────────────────────────────────────────
+MODEL_PATH  = "../Qwen3-0.6B"
+RESULTS_DIR = Path(__file__).parent
+CAL_DATASET = ("wikitext", "wikitext-2-raw-v1", "validation")
 
-cfg["msd_calibration_data"] = calibration_data
-cfg["use_msd_truncation"] = True
+# ── Calibration setups (one per MXFP format) ─────────────────────────────────
+CAL_SETUPS = [
+    (1, "MXFP8",      "MXFP8 (E4M3FN)",
+     {"use_mxfp8": True}),
+    (2, "MXFP6_E2M3", "MXFP6 E2M3",
+     {"use_mxfp6": True, "mxfp6_format": "e2m3"}),
+    (3, "MXFP6_E3M2", "MXFP6 E3M2",
+     {"use_mxfp6": True, "mxfp6_format": "e3m2"}),
+    (4, "MXFP4",      "MXFP4 (E2M1)",
+     {"use_mxfp4": True}),
+]
 
-with open(config_path, "w") as f:
-    json.dump(cfg, f, indent=2)
 
-print(f"Calibration saved to {config_path}")
+def main():
+    parser = argparse.ArgumentParser(
+        description="MSD budget calibration for MXFP formats (multi-GPU via torchrun)"
+    )
+    parser.add_argument("--list", action="store_true",
+                        help="List all calibration setups and exit")
+    parser.add_argument("--setup", type=int, default=None, metavar="ID",
+                        help="Run a single setup by ID (1-4)")
+    parser.add_argument("--only", nargs="+", type=int, metavar="ID",
+                        help="Run only these setup IDs (e.g. --only 1 2)")
+    parser.add_argument("--force", action="store_true",
+                        help="Re-run even if calibration file already exists")
+    parser.add_argument("--gpus", type=str, default=None,
+                        help="Comma-separated physical GPU IDs, e.g. '0,2,5'. "
+                             "Must match --nproc_per_node when using torchrun.")
+    parser.add_argument("--target-snr", type=float, default=30.0,
+                        help="Target SNR in dB (default: 30.0). Higher = more budget.")
+    parser.add_argument("--num-texts", type=int, default=20,
+                        help="Number of calibration paragraphs (default: 20)")
+    parser.add_argument("--max-length", type=int, default=512,
+                        help="Max token length per calibration sample (default: 512)")
+    parser.add_argument("--batch-size", type=int, default=4,
+                        help="Batch size for calibration forward passes (default: 4)")
+    parser.add_argument("--online-delay", type=int, default=2,
+                        help="MSD online delay δ (default: 2)")
+    args = parser.parse_args()
+    restrict_gpus(args.gpus)
+
+    # ── Distributed init (no NCCL — ranks work independently) ──
+    rank, world_size, local_rank, device = init_distributed_lite()
+    dtype = torch.float16 if device.type == "cuda" else torch.float32
+
+    # ── List mode ──
+    if args.list:
+        if is_main(rank):
+            print(f"\n{'ID':>3}  {'Tag':<15}  Description")
+            print("-" * 50)
+            for sid, tag, desc, _ in CAL_SETUPS:
+                result_file = RESULTS_DIR / f"calibration_{tag}.json"
+                exists = "  (done)" if result_file.exists() else ""
+                print(f"{sid:3d}  {tag:<15}  {desc}{exists}")
+            print()
+        cleanup_distributed()
+        return
+
+    # ── Select setups ──
+    if args.setup is not None:
+        # --setup overrides --only
+        selected = next((s for s in CAL_SETUPS if s[0] == args.setup), None)
+        if selected is None:
+            if is_main(rank):
+                print(f"Unknown setup ID: {args.setup}. "
+                      f"Valid IDs: {[s[0] for s in CAL_SETUPS]}. Use --list.")
+            cleanup_distributed()
+            return
+        run_setups = [selected]
+    elif args.only:
+        selected_ids = set(args.only)
+        run_setups = [s for s in CAL_SETUPS if s[0] in selected_ids]
+        if not run_setups:
+            if is_main(rank):
+                print(f"No matching setup IDs: {args.only}")
+                print(f"Valid IDs: {[s[0] for s in CAL_SETUPS]}")
+            cleanup_distributed()
+            return
+    else:
+        run_setups = list(CAL_SETUPS)
+
+    # Partition setups across ranks (round-robin)
+    my_setups = run_setups[rank::world_size]
+
+    if is_main(rank):
+        print(f"World size: {world_size}  |  Device: {device}  |  dtype: {dtype}")
+        print(f"Total setups: {len(run_setups)}  |  Setups on this rank: {len(my_setups)}")
+        print(f"Target SNR: {args.target_snr}dB  |  Calibration texts: {args.num_texts}")
+        print()
+
+    if not my_setups:
+        print(f"[rank {rank}] No setups assigned (more GPUs than setups). Idle.")
+        file_barrier(rank, world_size, RESULTS_DIR)
+        cleanup_distributed()
+        return
+
+    # ── Load model ──
+    if is_main(rank):
+        print("Loading tokenizer & model ...")
+
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, local_files_only=True)
+    model = AutoModelForCausalLM.from_pretrained(
+        MODEL_PATH, local_files_only=True, torch_dtype=dtype
+    )
+    model.to(device)
+    model.eval()
+
+    if is_main(rank):
+        num_params = sum(p.numel() for p in model.parameters())
+        print(f"Model: {MODEL_PATH}  |  Params: {num_params/1e6:.1f}M")
+
+    # ── Load calibration data ──
+    ds_name, ds_config, ds_split = CAL_DATASET
+    if is_main(rank):
+        print(f"Loading dataset: {ds_name}/{ds_config} ({ds_split}) ...")
+
+    ds = load_dataset(ds_name, ds_config, split=ds_split)
+    cal_texts = [t for t in ds["text"] if len(t.strip()) > 100][:args.num_texts]
+
+    if is_main(rank):
+        print(f"Calibration texts: {len(cal_texts)} paragraphs "
+              f"(max_length={args.max_length}, batch_size={args.batch_size})")
+        print()
+
+    # ── Run assigned setups ──
+    total_start = time.perf_counter()
+
+    for i, (sid, tag, desc, overrides) in enumerate(my_setups):
+        result_file = RESULTS_DIR / f"calibration_{tag}.json"
+        print(f"[rank {rank}] {'='*55}")
+        print(f"[rank {rank}]   [{i+1}/{len(my_setups)}]  Setup #{sid}: {desc}")
+        print(f"[rank {rank}]   Tag: {tag}  ->  {result_file.name}")
+        print(f"[rank {rank}] {'='*55}")
+
+        # Skip if exists
+        if result_file.exists() and not args.force:
+            print(f"[rank {rank}]   Already exists. Use --force to re-run.\n")
+            continue
+
+        # Reset to baseline, then apply this setup's MXFP overrides
+        apply_config(model.config, _BASELINE_OVERRIDES)
+        apply_config(model.config, overrides)
+        reconfigure_mlp_layers(model, device)
+
+        # Show active config
+        active_flags = []
+        for k in ["use_mxfp8", "use_mxfp6", "use_mxfp4", "mxfp6_format"]:
+            v = getattr(model.config, k, None)
+            if v is not None and v is not False:
+                active_flags.append(f"{k}={v}")
+        print(f"[rank {rank}]   Config: {', '.join(active_flags)}")
+
+        # Run calibration (GPU-accelerated, output-chunked)
+        t0 = time.perf_counter()
+        calibration_data = calibrate_channel_budgets(
+            model, tokenizer, cal_texts,
+            target_snr_db=args.target_snr,
+            max_length=args.max_length,
+            batch_size=args.batch_size,
+            online_delay=args.online_delay,
+        )
+        elapsed = time.perf_counter() - t0
+
+        if not calibration_data:
+            print(f"[rank {rank}]   WARNING: No MXFP layers found. Skipping.\n")
+            continue
+
+        # Compute summary statistics
+        all_budgets = []
+        for layer_budgets in calibration_data.values():
+            all_budgets.extend(layer_budgets)
+
+        result = {
+            "format": tag,
+            "description": desc,
+            "config_overrides": overrides,
+            "calibration_params": {
+                "target_snr_db": args.target_snr,
+                "num_texts": len(cal_texts),
+                "max_length": args.max_length,
+                "batch_size": args.batch_size,
+                "online_delay": args.online_delay,
+            },
+            "summary": {
+                "num_layers": len(calibration_data),
+                "total_channels": len(all_budgets),
+                "budget_min": min(all_budgets),
+                "budget_max": max(all_budgets),
+                "budget_mean": sum(all_budgets) / len(all_budgets),
+                "wall_time_sec": round(elapsed, 2),
+            },
+            "msd_calibration_data": calibration_data,
+        }
+
+        with open(result_file, "w") as f:
+            json.dump(result, f, indent=2)
+
+        print(f"[rank {rank}]   Layers: {len(calibration_data)}  |  "
+              f"Budget: [{min(all_budgets):.0f}, {max(all_budgets):.0f}]  |  "
+              f"Mean: {sum(all_budgets)/len(all_budgets):.1f}")
+        print(f"[rank {rank}]   {elapsed:.1f}s  |  saved -> {result_file.name}\n")
+
+    total_elapsed = time.perf_counter() - total_start
+
+    # ── Wait for all ranks ──
+    file_barrier(rank, world_size, RESULTS_DIR)
+
+    # ── Summary (rank 0) ──
+    if is_main(rank):
+        print()
+        print(f"{'='*60}")
+        print(f"  CALIBRATION COMPLETE  ({total_elapsed/60:.1f} min, {world_size} GPUs)")
+        print(f"{'='*60}")
+        print(f"{'ID':>3}  {'Tag':<15}  {'Layers':>7}  {'Budget Range':>14}  {'Mean':>6}  {'Time':>6}")
+        print("-" * 60)
+
+        for sid, tag, desc, _ in run_setups:
+            result_file = RESULTS_DIR / f"calibration_{tag}.json"
+            if result_file.exists():
+                with open(result_file) as f:
+                    res = json.load(f)
+                s = res.get("summary", {})
+                bmin = s.get("budget_min", "?")
+                bmax = s.get("budget_max", "?")
+                bmean = s.get("budget_mean", "?")
+                nlayers = s.get("num_layers", "?")
+                wall = s.get("wall_time_sec", "?")
+                bmin_s = f"{bmin:.0f}" if isinstance(bmin, (int, float)) else str(bmin)
+                bmax_s = f"{bmax:.0f}" if isinstance(bmax, (int, float)) else str(bmax)
+                bmean_s = f"{bmean:.1f}" if isinstance(bmean, (int, float)) else str(bmean)
+                wall_s = f"{wall:.0f}s" if isinstance(wall, (int, float)) else str(wall)
+                print(f"{sid:3d}  {tag:<15}  {nlayers:>7}  [{bmin_s:>5}, {bmax_s:<5}]  {bmean_s:>6}  {wall_s:>6}")
+            else:
+                print(f"{sid:3d}  {tag:<15}  {'MISSING':>7}")
+
+        print("-" * 60)
+        print(f"\nCalibration files saved in: {RESULTS_DIR}")
+        print(f"To use with PPL tests, copy msd_calibration_data from")
+        print(f"calibration_<tag>.json into Qwen3-0.6B/config.json, or")
+        print(f"load programmatically with apply_calibration_to_config().")
+
+    cleanup_distributed()
+
+
+if __name__ == "__main__":
+    main()

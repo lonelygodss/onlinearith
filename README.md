@@ -405,80 +405,117 @@ torchrun --nproc_per_node=3 ppl_batch.py --gpus 0,2,5
 
 ## 5. Running Calibration
 
-Calibration determines optimal per-channel cycle budgets (B_base) based on actual weight/activation statistics.
+Calibration determines optimal per-channel cycle budgets (B_base) based on actual weight/activation statistics. `calibrate.py` supports **multi-GPU via torchrun** (like `ppl_batch.py`) and covers all 4 MXFP formats.
+
+### Available Calibration Setups
+
+| ID | Tag | Description |
+|----|-----|-------------|
+| 1 | `MXFP8` | MXFP8 (E4M3FN) |
+| 2 | `MXFP6_E2M3` | MXFP6 E2M3 |
+| 3 | `MXFP6_E3M2` | MXFP6 E3M2 |
+| 4 | `MXFP4` | MXFP4 (E2M1) |
 
 ### Quick Start
 
-```python
-import sys
-sys.path.insert(0, "/home/xzjnew/coding/transformers/src")
+```bash
+cd /home/xzj/coding/onlinearith
+source /home/xzj/coding/.venv3_10/bin/activate
 
-import json
-import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from transformers.models.qwen3.calibration_msd import calibrate_channel_budgets
+# List calibration setups
+python calibrate.py --list
 
-# 1. Load model with MXFP format enabled (MSD off for calibration)
-model_path = "/home/xzjnew/coding/Qwen3-0.6B"
-tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
-model = AutoModelForCausalLM.from_pretrained(
-    model_path, local_files_only=True, torch_dtype=torch.float16
-)
-device = "cuda" if torch.cuda.is_available() else "cpu"
-model.to(device)
-model.eval()
+# Single format on single GPU
+python calibrate.py --setup 1
 
-# 2. Prepare calibration texts (use a small diverse sample)
-from datasets import load_dataset
-ds = load_dataset("wikitext", "wikitext-2-raw-v1", split="validation")
-# Take ~20 non-empty paragraphs as calibration data
-cal_texts = [t for t in ds["text"] if len(t.strip()) > 100][:20]
-print(f"Calibration texts: {len(cal_texts)} paragraphs")
+# All 4 formats on 4 GPUs (~1 min total)
+torchrun --nproc_per_node=4 calibrate.py
 
-# 3. Run calibration
-calibration_data = calibrate_channel_budgets(
-    model, tokenizer, cal_texts,
-    target_snr_db=30.0,    # Target SNR; try 20, 30, 40
-    max_length=512,
-    batch_size=4,
-    online_delay=2,
-)
+# Specific GPUs
+torchrun --nproc_per_node=2 calibrate.py --gpus 0,3
 
-# 4. Save calibrated config back to config.json
-config_path = f"{model_path}/config.json"
-with open(config_path, "r") as f:
-    cfg = json.load(f)
+# Subset of formats
+torchrun --nproc_per_node=2 calibrate.py --only 1 4
 
-cfg["msd_calibration_data"] = calibration_data
-cfg["use_msd_truncation"] = True
+# Custom SNR target (higher = more budget = less error)
+torchrun --nproc_per_node=4 calibrate.py --target-snr 40
 
-with open(config_path, "w") as f:
-    json.dump(cfg, f, indent=2)
+# Re-run even if result files exist
+torchrun --nproc_per_node=4 calibrate.py --force
 
-print(f"Calibration saved to {config_path}")
+# Single specific GPU
+python calibrate.py --gpus 3 --setup 1
 ```
 
-You can also save this as a standalone script (e.g., `calibrate.py`) and run it.
+Output files are named `calibration_{tag}.json` and saved in `onlinearith/`.
+
+### Parallelism Strategy
+
+| # GPUs | Behavior |
+|--------|----------|
+| 1 | Runs all selected formats sequentially on one GPU |
+| 2-4 | Formats partitioned round-robin across GPUs |
+| >4 | Extra GPUs sit idle (only 4 formats available) |
+
+Uses `init_distributed_lite()` — no NCCL, ranks work independently.
 
 ### Calibration Parameters
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `target_snr_db` | 30.0 | Target signal-to-noise ratio. Higher = more budget = less error. Try 20, 30, 40. |
-| `max_length` | 512 | Max token length for calibration inputs |
-| `batch_size` | 4 | Batch size for calibration forward passes |
-| `online_delay` | 2 | MSD online delay (should match inference config) |
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--target-snr` | 30.0 | Target SNR in dB. Higher = more budget = less truncation error. Try 20, 30, 40. |
+| `--num-texts` | 20 | Number of calibration paragraphs from WikiText-2 validation set |
+| `--max-length` | 512 | Max token length per calibration sample |
+| `--batch-size` | 4 | Batch size for calibration forward passes |
+| `--online-delay` | 2 | MSD online delay δ (should match inference config) |
+
+### Expected Runtime
+
+- Single GPU: ~2-5 min per format (depends on `--num-texts` and `--max-length`)
+- 4× RTX 5090: ~2-5 min total (all 4 formats in parallel)
+
+### Using Calibration Results with PPL Tests
+
+After calibration, copy the `msd_calibration_data` field from the calibration JSON into `Qwen3-0.6B/config.json`:
+
+```bash
+# Example: use MXFP8 calibration with PPL test
+python -c "
+import json
+with open('calibration_MXFP8.json') as f:
+    cal = json.load(f)
+with open('../Qwen3-0.6B/config.json') as f:
+    cfg = json.load(f)
+cfg['msd_calibration_data'] = cal['msd_calibration_data']
+cfg['use_msd_truncation'] = True
+cfg['use_mxfp8'] = True
+with open('../Qwen3-0.6B/config.json', 'w') as f:
+    json.dump(cfg, f, indent=2)
+print('Done')
+"
+
+# Then run PPL test (setup 14 = MXFP8 + MSD + Calibrated)
+torchrun --nproc_per_node=8 ppltest.py --setup 14
+```
 
 ### Interpreting Results
 
-After calibration, `config.json` will contain `msd_calibration_data` mapping each MLP linear layer to per-channel budgets:
+Each `calibration_{tag}.json` contains:
 
 ```json
 {
+  "format": "MXFP8",
+  "summary": {
+    "num_layers": 84,
+    "budget_min": 8,
+    "budget_max": 32,
+    "budget_mean": 16.5,
+    "wall_time_sec": 120.0
+  },
   "msd_calibration_data": {
-    "layers.0.mlp.gate_proj": [12, 14, 16, ...],
-    "layers.0.mlp.up_proj": [10, 12, 14, ...],
-    "layers.0.mlp.down_proj": [14, 16, 18, ...],
+    "model.layers.0.mlp.gate_proj": [12, 14, 16, ...],
+    "model.layers.0.mlp.up_proj": [10, 12, 14, ...],
+    "model.layers.0.mlp.down_proj": [14, 16, 18, ...],
     ...
   }
 }
@@ -619,6 +656,6 @@ When `msd_deep_pipeline=true`, precision is tracked through the MLP stages:
 | `qwen3test.py` | Quick generation sanity check |
 | `benchmarktest.py` | lm-eval harness (MMLU, GSM8K) |
 | `visualization.py` | Chart generation from benchmark JSON results |
-| `calibrate.py` | (create from Section 5 snippet) Offline budget calibration |
+| `calibrate.py` | Offline MSD budget calibration, multi-GPU via torchrun |
 | `ppl_results_*.json` | Saved PPL evaluation results (one per setup) |
 | `ppl_batch_summary.json` | Consolidated batch summary with all metrics |

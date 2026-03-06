@@ -435,13 +435,13 @@ def test_calibration_import():
     from transformers.models.qwen3.calibration_msd import (
         calibrate_channel_budgets,
         apply_calibration_to_config,
-        _compute_block_delay_stats,
+        _compute_intra_delays,
         _find_budget_for_snr,
     )
 
     assert callable(calibrate_channel_budgets), "calibrate_channel_budgets not callable"
     assert callable(apply_calibration_to_config), "apply_calibration_to_config not callable"
-    assert callable(_compute_block_delay_stats), "_compute_block_delay_stats not callable"
+    assert callable(_compute_intra_delays), "_compute_intra_delays not callable"
     assert callable(_find_budget_for_snr), "_find_budget_for_snr not callable"
     print("[PASS] Calibration module imports successfully")
     print("[PASS] All calibration functions are callable")
