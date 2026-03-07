@@ -10,6 +10,13 @@ Two init modes:
   - ``init_distributed()``      — full NCCL process group (for all_reduce, etc.)
   - ``init_distributed_lite()`` — GPU assignment only, NO NCCL (for independent work)
 
+Auto-launch:
+  Scripts can call ``maybe_relaunch_with_torchrun(nproc)`` at startup.
+  If the current process is NOT already a torchrun child, it will
+  automatically find a free port and re-exec via torchrun.  This avoids
+  the common ``EADDRINUSE`` error on port 29500 when multiple torchrun
+  jobs share the same machine.
+
 Usage:
     rank, world_size, local_rank, device = init_distributed()
     ...
@@ -17,6 +24,8 @@ Usage:
 """
 
 import os
+import socket
+import sys
 import time
 from pathlib import Path
 
@@ -60,6 +69,98 @@ def restrict_gpus(gpu_ids: str | None) -> int:
     # After setting the env var, PyTorch will see len(ids) devices
     # numbered 0 .. len(ids)-1.
     return len(ids)
+
+
+def find_free_port(start: int = 29500, end: int = 29999) -> int:
+    """
+    Find an available TCP port for torchrun rendezvous.
+
+    Scans from *start* upward until a free port is found (or raises
+    RuntimeError if the entire range is exhausted).
+
+    Returns:
+        An available port number.
+    """
+    for port in range(start, end + 1):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.bind(("", port))
+                return port
+        except OSError:
+            continue
+    raise RuntimeError(
+        f"No free port found in range [{start}, {end}]. "
+        f"Free some ports or adjust the range."
+    )
+
+
+def maybe_relaunch_with_torchrun(nproc: int | None, extra_env: dict | None = None):
+    """
+    Auto-launch the current script under torchrun with a free port.
+
+    Call this at the very beginning of ``if __name__ == "__main__":``,
+    **before** any CUDA or distributed initialisation.  If the current
+    process is already a torchrun child (``RANK`` env var exists) or
+    *nproc* is None/0/1, this function returns immediately and the
+    script continues normally in single-process mode.
+
+    Otherwise it finds a free port, constructs the torchrun command, and
+    replaces the current process via ``os.execvp``.  The script will
+    restart as torchrun children with ``RANK``, ``WORLD_SIZE``, etc.
+    set automatically.
+
+    Args:
+        nproc:     Number of worker processes (GPUs).  If None or ≤ 1,
+                   no relaunch happens.
+        extra_env: Optional dict of environment variables to set before
+                   re-exec (e.g. ``{"CUDA_VISIBLE_DEVICES": "4,5,6,7"}``).
+
+    Example in a script::
+
+        if __name__ == "__main__":
+            args = parse_args()          # must include --nproc
+            restrict_gpus(args.gpus)     # set CUDA_VISIBLE_DEVICES first
+            maybe_relaunch_with_torchrun(args.nproc)
+            main(args)                   # reached only by torchrun children
+    """
+    # Already under torchrun → nothing to do
+    if "RANK" in os.environ:
+        return
+
+    if nproc is None or nproc <= 1:
+        return
+
+    port = find_free_port()
+
+    # Preserve CUDA_VISIBLE_DEVICES if it was already set by restrict_gpus()
+    if extra_env:
+        os.environ.update(extra_env)
+
+    # Strip --nproc <N> from the forwarded script args so it doesn't clash
+    # with torchrun's own --nproc-per-node / --nproc_per_node option.
+    script_argv = []
+    it = iter(sys.argv[1:])
+    for tok in it:
+        if tok == "--nproc":
+            next(it, None)   # consume the value
+        elif tok.startswith("--nproc="):
+            pass             # drop --nproc=N
+        else:
+            script_argv.append(tok)
+
+    cmd = [
+        sys.executable, "-m", "torch.distributed.run",
+        f"--nproc_per_node={nproc}",
+        f"--master-port={port}",
+        sys.argv[0],         # the script path
+    ] + script_argv
+
+    print(f"[auto-launch] torchrun --nproc_per_node={nproc} "
+          f"--master-port={port} {sys.argv[0]} {' '.join(script_argv)}")
+
+    os.execvp(sys.executable, cmd)
+    # execvp replaces the process — never returns
 
 
 def init_distributed():

@@ -1,10 +1,15 @@
 """
 Batch PPL evaluation across all MSD / MXFP configuration combinations.
 
-Supports **multi-GPU** via torchrun:
-    torchrun --nproc_per_node=8 ppl_batch.py             # all 21 setups on 8 GPUs
-    torchrun --nproc_per_node=4 ppl_batch.py --only 2 6  # subset on 4 GPUs
+Supports **multi-GPU** — either auto-launched (recommended) or via torchrun:
+    python ppl_batch.py --nproc 8                        # auto-launch 8 GPUs (picks free port)
+    python ppl_batch.py --nproc 4 --only 2 6             # subset on 4 GPUs
+    python ppl_batch.py --nproc 4 --gpus 4,5,6,7         # specific GPUs, free port
     python ppl_batch.py                                   # single-GPU fallback
+
+    # Manual torchrun (you must pick a free port yourself if 29500 is taken):
+    torchrun --nproc_per_node=8 --master-port=29501 ppl_batch.py
+    torchrun --nproc_per_node=3 --master-port=29501 ppl_batch.py --gpus 0,2,5
 
 Each GPU loads its own model copy and processes a shard of the setups.
 Setups are partitioned round-robin across ranks; each rank writes its
@@ -22,11 +27,11 @@ assign more setups to them.  For now, just assign round-robin and let the user m
 
 Usage:
     cd /home/xzj/coding/onlinearith
-    torchrun --nproc_per_node=8 ppl_batch.py                 # run all setups
-    torchrun --nproc_per_node=8 ppl_batch.py --list          # list setups (rank 0)
-    torchrun --nproc_per_node=8 ppl_batch.py --only 1 6 10   # run only selected
-    torchrun --nproc_per_node=8 ppl_batch.py --force         # re-run even if done
-    torchrun --nproc_per_node=3 ppl_batch.py --gpus 0,2,5    # use specific GPUs
+    python ppl_batch.py --nproc 8                             # run all setups
+    python ppl_batch.py --nproc 8 --list                      # list setups (rank 0)
+    python ppl_batch.py --nproc 8 --only 1 6 10               # run only selected
+    python ppl_batch.py --nproc 4 --gpus 4,5,6,7              # specific GPUs
+    python ppl_batch.py --nproc 8 --force                     # re-run even if done
     python ppl_batch.py                                       # single-GPU fallback
     python ppl_batch.py --gpus 3                              # single specific GPU
 """
@@ -48,6 +53,7 @@ from dist_utils import (
     file_barrier,
     init_distributed_lite,
     is_main,
+    maybe_relaunch_with_torchrun,
     restrict_gpus,
 )
 
@@ -288,11 +294,16 @@ def main():
                         help="Run only these setup IDs (e.g. --only 1 6 10)")
     parser.add_argument("--force", action="store_true",
                         help="Re-run even if result file already exists")
+    parser.add_argument("--nproc", type=int, default=None, metavar="N",
+                        help="Number of GPU workers. Auto-launches via torchrun "
+                             "with a free port (avoids EADDRINUSE). "
+                             "Replaces manual 'torchrun --nproc_per_node=N'.")
     parser.add_argument("--gpus", type=str, default=None,
-                        help="Comma-separated physical GPU IDs to use, e.g. '0,2,5'. "
-                             "Must match --nproc_per_node when using torchrun.")
+                        help="Comma-separated physical GPU IDs to use, e.g. '4,5,6,7'. "
+                             "Must match --nproc (or --nproc_per_node if using torchrun).")
     args = parser.parse_args()
     restrict_gpus(args.gpus)
+    maybe_relaunch_with_torchrun(args.nproc)
 
     # ── Distributed init (no NCCL — ranks work independently) ──
     rank, world_size, local_rank, device = init_distributed_lite()

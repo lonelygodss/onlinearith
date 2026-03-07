@@ -1,10 +1,15 @@
 """
 Offline MSD budget calibration across MXFP formats.
 
-Supports **multi-GPU** via torchrun (setup-level parallelism):
-    torchrun --nproc_per_node=4 calibrate.py              # all 4 formats on 4 GPUs
-    torchrun --nproc_per_node=2 calibrate.py --only 1 2   # subset on 2 GPUs
+Supports **multi-GPU** — either auto-launched (recommended) or via torchrun:
+    python calibrate.py --nproc 4                          # auto-launch 4 GPUs (picks free port)
+    python calibrate.py --nproc 4 --gpus 4,5,6,7          # specific GPUs, free port
+    python calibrate.py --nproc 2 --only 1 2               # subset on 2 GPUs
     python calibrate.py --setup 1                          # single format, single GPU
+
+    # Manual torchrun (you must pick a free port yourself if 29500 is taken):
+    torchrun --nproc_per_node=4 --master-port=29501 calibrate.py
+    torchrun --nproc_per_node=2 --master-port=29501 calibrate.py --gpus 0,3
 
 Each GPU loads its own model copy and calibrates its assigned format(s).
 Formats are partitioned round-robin across ranks; each rank writes its
@@ -18,10 +23,10 @@ Usage:
 
     python calibrate.py --list                                # list setups
     python calibrate.py --setup 1                             # single format
-    torchrun --nproc_per_node=4 calibrate.py                  # all 4 formats
-    torchrun --nproc_per_node=2 calibrate.py --gpus 0,3      # specific GPUs
-    torchrun --nproc_per_node=4 calibrate.py --target-snr 40  # custom SNR
-    torchrun --nproc_per_node=4 calibrate.py --force          # re-run existing
+    python calibrate.py --nproc 4                             # all 4 formats, auto port
+    python calibrate.py --nproc 4 --gpus 4,5,6,7             # specific GPUs
+    python calibrate.py --nproc 4 --target-snr 40            # custom SNR
+    python calibrate.py --nproc 4 --force                    # re-run existing
 """
 
 import sys
@@ -34,6 +39,7 @@ from pathlib import Path
 
 import torch
 from datasets import load_dataset
+from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.models.qwen3.calibration_msd import calibrate_channel_budgets
 
@@ -42,6 +48,7 @@ from dist_utils import (
     file_barrier,
     init_distributed_lite,
     is_main,
+    maybe_relaunch_with_torchrun,
     restrict_gpus,
 )
 from ppl_batch import (
@@ -80,9 +87,13 @@ def main():
                         help="Run only these setup IDs (e.g. --only 1 2)")
     parser.add_argument("--force", action="store_true",
                         help="Re-run even if calibration file already exists")
+    parser.add_argument("--nproc", type=int, default=None, metavar="N",
+                        help="Number of GPU workers. Auto-launches via torchrun "
+                             "with a free port (avoids EADDRINUSE). "
+                             "Replaces manual 'torchrun --nproc_per_node=N'.")
     parser.add_argument("--gpus", type=str, default=None,
-                        help="Comma-separated physical GPU IDs, e.g. '0,2,5'. "
-                             "Must match --nproc_per_node when using torchrun.")
+                        help="Comma-separated physical GPU IDs, e.g. '4,5,6,7'. "
+                             "Must match --nproc (or --nproc_per_node if using torchrun).")
     parser.add_argument("--target-snr", type=float, default=30.0,
                         help="Target SNR in dB (default: 30.0). Higher = more budget.")
     parser.add_argument("--num-texts", type=int, default=20,
@@ -95,6 +106,7 @@ def main():
                         help="MSD online delay δ (default: 2)")
     args = parser.parse_args()
     restrict_gpus(args.gpus)
+    maybe_relaunch_with_torchrun(args.nproc)
 
     # ── Distributed init (no NCCL — ranks work independently) ──
     rank, world_size, local_rank, device = init_distributed_lite()
@@ -182,7 +194,14 @@ def main():
     # ── Run assigned setups ──
     total_start = time.perf_counter()
 
-    for i, (sid, tag, desc, overrides) in enumerate(my_setups):
+    setup_iter = list(my_setups)
+    setup_iter = tqdm(
+        setup_iter,
+        desc=f"[rank {rank}] calibration setups",
+        disable=not is_main(rank),
+    )
+
+    for i, (sid, tag, desc, overrides) in enumerate(setup_iter):
         result_file = RESULTS_DIR / f"calibration_{tag}.json"
         print(f"[rank {rank}] {'='*55}")
         print(f"[rank {rank}]   [{i+1}/{len(my_setups)}]  Setup #{sid}: {desc}")
@@ -215,6 +234,8 @@ def main():
             max_length=args.max_length,
             batch_size=args.batch_size,
             online_delay=args.online_delay,
+            show_progress=is_main(rank),
+            progress_prefix=f"[rank {rank}] ",
         )
         elapsed = time.perf_counter() - t0
 

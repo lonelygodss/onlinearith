@@ -15,7 +15,7 @@ representation. Implemented as modifications to the Qwen3 model in the HuggingFa
 - `transformers/src/transformers/models/qwen3/configuration_qwen3.py` — Config with MSD fields
 - `transformers/src/transformers/models/qwen3/calibration_msd.py` — Offline budget calibration utility
 
-**Evaluation scripts (multi-GPU via torchrun):**
+**Evaluation scripts (multi-GPU via `--nproc` auto-launch or torchrun):**
 - `onlinearith/ppltest.py` — Single-setup PPL evaluation with window-level data parallelism
 - `onlinearith/ppl_batch.py` — All-setup batch PPL evaluation with setup-level parallelism
 - `onlinearith/dist_utils.py` — Lightweight distributed helpers (NCCL init, all_reduce, barrier)
@@ -200,8 +200,8 @@ Suggested sweep values: **8, 12, 16, 20, 24, 32**
 
 ## 4. Running PPL Tests
 
-Both `ppltest.py` and `ppl_batch.py` support **multi-GPU via torchrun** and **single-GPU fallback**.
-When launched with `torchrun`, each GPU loads its own model copy (~1.2 GB for Qwen3-0.6B, well
+Both `ppltest.py` and `ppl_batch.py` support **multi-GPU via `--nproc`** (auto-launch) and **single-GPU fallback**.
+When running multi-GPU, each GPU loads its own model copy (~1.2 GB for Qwen3-0.6B, well
 within 32 GB per RTX 5090) and processes its shard of the work.
 
 ### Quick Start (Multi-GPU)
@@ -211,23 +211,23 @@ cd /home/xzj/coding/onlinearith
 source /home/xzj/coding/.venv3_10/bin/activate
 
 # Single PPL evaluation — 8 GPUs, ~7-8x speedup
-torchrun --nproc_per_node=8 ppltest.py --setup 2
+python ppltest.py --nproc 8 --setup 2
 
 # Full 21-config sweep — 8 GPUs, ~3x speedup
-torchrun --nproc_per_node=8 ppl_batch.py
+python ppl_batch.py --nproc 8
 
 # Subset of configs on 8 GPUs
-torchrun --nproc_per_node=8 ppl_batch.py --only 2 6 10
+python ppl_batch.py --nproc 8 --only 2 6 10
 
-# Use only specific GPUs (e.g. GPUs 0, 2, 5 — when others are busy)
-torchrun --nproc_per_node=3 ppltest.py --gpus 0,2,5 --setup 6
-torchrun --nproc_per_node=3 ppl_batch.py --gpus 0,2,5
+# Use only specific GPUs (e.g. GPUs 4,5,6,7 — when 0-3 are busy)
+python ppltest.py --nproc 4 --gpus 4,5,6,7 --setup 6
+python ppl_batch.py --nproc 4 --gpus 4,5,6,7
 
 # List all predefined setups (works for both scripts)
 python ppltest.py --list
 python ppl_batch.py --list
 
-# Single-GPU fallback (unchanged behavior, no torchrun needed)
+# Single-GPU fallback (unchanged behavior, no --nproc needed)
 python ppltest.py --setup 1
 python ppl_batch.py
 
@@ -245,27 +245,36 @@ restrict which physical GPUs are used:
 # 1. Check which GPUs are idle
 nvidia-smi   # or nvtop
 
-# 2. Suppose GPUs 0, 3, 7 are free — use only those
-torchrun --nproc_per_node=3 ppl_batch.py --gpus 0,3,7
+# 2. Suppose GPUs 4, 5, 7 are free — use only those
+python ppl_batch.py --nproc 3 --gpus 4,5,7
 
 # For single-GPU mode, just specify one GPU
 python ppltest.py --gpus 3
 ```
 
-**Important:** When using `torchrun`, `--nproc_per_node` must **equal** the
-number of GPU IDs in `--gpus`. A mismatch will produce a clear error message.
+**Important:** `--nproc` must **equal** the number of GPU IDs in `--gpus`.
+A mismatch will produce a clear error message from torchrun.
+
+`--nproc` finds a free rendezvous port automatically, so it is safe to run
+multiple jobs in parallel on the same machine without `EADDRINUSE` errors.
 
 The `--gpus` flag sets `CUDA_VISIBLE_DEVICES` internally before any CUDA
 context is created. You can also set the environment variable directly if
 you prefer:
 
 ```bash
-# Equivalent to --gpus 0,3,7
-CUDA_VISIBLE_DEVICES=0,3,7 torchrun --nproc_per_node=3 ppl_batch.py
+# Equivalent to --nproc 3 --gpus 4,5,7
+CUDA_VISIBLE_DEVICES=4,5,7 python ppl_batch.py --nproc 3
 ```
 
 If both `--gpus` and `CUDA_VISIBLE_DEVICES` are provided, `--gpus` takes
 precedence (it overwrites the env var).
+
+If you prefer to invoke torchrun manually, you must pick a free port yourself:
+
+```bash
+torchrun --nproc_per_node=3 --master-port=29501 ppl_batch.py --gpus 4,5,7
+```
 
 ### Parallelism Strategy
 
@@ -274,7 +283,7 @@ precedence (it overwrites the env var).
 | `ppltest.py` | **Window-level** | 578 sliding windows are sharded round-robin across GPUs. Partial NLL sums are aggregated via NCCL `all_reduce`. Only rank 0 saves the JSON. |
 | `ppl_batch.py` | **Setup-level** | 21 config setups are partitioned round-robin across GPUs. Each GPU evaluates its assigned setups independently, writing result files directly. Rank 0 prints the summary table after all ranks finish. |
 
-The `MSDComputeContext._active` class-level singleton is **process-safe** under torchrun
+The `MSDComputeContext._active` class-level singleton is **process-safe** under `--nproc` / torchrun
 (each rank is a separate Python process with its own address space).
 
 ### Procedure (Single Setup)
@@ -290,10 +299,10 @@ via `--setup ID`. The setup ID numbering is identical across both scripts.
 2. **Run a setup by ID:**
    ```bash
    # Multi-GPU (recommended)
-   torchrun --nproc_per_node=8 ppltest.py --setup 6      # MXFP8 + MSD B=16
+   python ppltest.py --nproc 8 --setup 6            # MXFP8 + MSD B=16
 
    # Use specific GPUs only
-   torchrun --nproc_per_node=3 ppltest.py --gpus 0,2,5 --setup 6
+   python ppltest.py --nproc 4 --gpus 4,5,6,7 --setup 6
 
    # Single-GPU fallback
    python ppltest.py --setup 6
@@ -306,7 +315,7 @@ via `--setup ID`. The setup ID numbering is identical across both scripts.
    `Qwen3-0.6B/config.json` and saves to the hardcoded `RESULTS_OUT` constant.
    ```bash
    # Edit config.json first, then:
-   torchrun --nproc_per_node=8 ppltest.py
+   python ppltest.py --nproc 8
    ```
 
 4. **Expected runtime:**
@@ -358,22 +367,22 @@ source /home/xzj/coding/.venv3_10/bin/activate
 python ppl_batch.py --list
 
 # Run ALL setups on 8 GPUs (~1.5 hours vs ~10 hours single-GPU)
-torchrun --nproc_per_node=8 ppl_batch.py
+python ppl_batch.py --nproc 8
 
 # Run only specific setups by ID
-torchrun --nproc_per_node=8 ppl_batch.py --only 1 6 10 14
+python ppl_batch.py --nproc 8 --only 1 6 10 14
 
-# Run on specific GPUs (e.g. 0, 2, 5 are idle)
-torchrun --nproc_per_node=3 ppl_batch.py --gpus 0,2,5
+# Run on specific GPUs (e.g. 4,5,6,7 are idle)
+python ppl_batch.py --nproc 4 --gpus 4,5,6,7
 
 # Combine GPU selection with setup filtering
-torchrun --nproc_per_node=3 ppl_batch.py --gpus 0,2,5 --only 1 6 10
+python ppl_batch.py --nproc 4 --gpus 4,5,6,7 --only 1 6 10
 
 # Re-run setups even if result files exist
-torchrun --nproc_per_node=8 ppl_batch.py --force
+python ppl_batch.py --nproc 8 --force
 
 # Resume after interruption (skips completed ones)
-torchrun --nproc_per_node=8 ppl_batch.py
+python ppl_batch.py --nproc 8
 
 # Single-GPU fallback (all of the above also work with plain python)
 python ppl_batch.py
@@ -397,7 +406,7 @@ containing all metrics, wall times, and run metadata in a single file for easy p
 **Tip:** Run inside `tmux` or `screen` so it survives SSH disconnections:
 ```bash
 tmux new -s ppl
-torchrun --nproc_per_node=3 ppl_batch.py --gpus 0,2,5
+python ppl_batch.py --nproc 4 --gpus 4,5,6,7
 # Ctrl+B then D to detach; tmux attach -t ppl to reconnect
 ```
 
@@ -405,7 +414,7 @@ torchrun --nproc_per_node=3 ppl_batch.py --gpus 0,2,5
 
 ## 5. Running Calibration
 
-Calibration determines optimal per-channel cycle budgets (B_base) based on actual weight/activation statistics. `calibrate.py` supports **multi-GPU via torchrun** (like `ppl_batch.py`) and covers all 4 MXFP formats.
+Calibration determines optimal per-channel cycle budgets (B_base) based on actual weight/activation statistics. `calibrate.py` supports **multi-GPU via `--nproc`** (like `ppl_batch.py`) and covers all 4 MXFP formats.
 
 ### Available Calibration Setups
 
@@ -429,19 +438,19 @@ python calibrate.py --list
 python calibrate.py --setup 1
 
 # All 4 formats on 4 GPUs (~1 min total)
-torchrun --nproc_per_node=4 calibrate.py
+python calibrate.py --nproc 4
 
 # Specific GPUs
-torchrun --nproc_per_node=2 calibrate.py --gpus 0,3
+python calibrate.py --nproc 4 --gpus 4,5,6,7
 
 # Subset of formats
-torchrun --nproc_per_node=2 calibrate.py --only 1 4
+python calibrate.py --nproc 2 --gpus 4,5 --only 1 4
 
 # Custom SNR target (higher = more budget = less error)
-torchrun --nproc_per_node=4 calibrate.py --target-snr 40
+python calibrate.py --nproc 4 --gpus 4,5,6,7 --target-snr 40
 
 # Re-run even if result files exist
-torchrun --nproc_per_node=4 calibrate.py --force
+python calibrate.py --nproc 4 --gpus 4,5,6,7 --force
 
 # Single specific GPU
 python calibrate.py --gpus 3 --setup 1
@@ -495,7 +504,7 @@ print('Done')
 "
 
 # Then run PPL test (setup 14 = MXFP8 + MSD + Calibrated)
-torchrun --nproc_per_node=8 ppltest.py --setup 14
+python ppltest.py --nproc 8 --setup 14
 ```
 
 ### Interpreting Results
@@ -648,14 +657,14 @@ When `msd_deep_pipeline=true`, precision is tracked through the MLP stages:
 
 | File | Purpose |
 |------|---------|
-| `ppltest.py` | Perplexity evaluation — single setup, multi-GPU via torchrun |
-| `ppl_batch.py` | Perplexity evaluation — all 21 setups, multi-GPU via torchrun |
+| `ppltest.py` | Perplexity evaluation — single setup, multi-GPU via `--nproc` |
+| `ppl_batch.py` | Perplexity evaluation — all 21 setups, multi-GPU via `--nproc` |
 | `dist_utils.py` | Distributed helpers (NCCL init, all_reduce, barrier, gather) |
 | `test_distributed.py` | Verification tests for multi-GPU infrastructure |
 | `test_mxfp8linear.py` | Unit tests for MXFP layers and MSD truncation |
 | `qwen3test.py` | Quick generation sanity check |
 | `benchmarktest.py` | lm-eval harness (MMLU, GSM8K) |
 | `visualization.py` | Chart generation from benchmark JSON results |
-| `calibrate.py` | Offline MSD budget calibration, multi-GPU via torchrun |
+| `calibrate.py` | Offline MSD budget calibration, multi-GPU via `--nproc` |
 | `ppl_results_*.json` | Saved PPL evaluation results (one per setup) |
 | `ppl_batch_summary.json` | Consolidated batch summary with all metrics |

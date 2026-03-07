@@ -1,16 +1,20 @@
 """
 Perplexity (PPL) evaluation script with richer metrics and reliable computation.
 
-Supports **multi-GPU** via torchrun:
-    torchrun --nproc_per_node=8 ppltest.py        # 8-GPU parallel
-    python ppltest.py                              # single-GPU fallback
-    torchrun --nproc_per_node=3 ppltest.py --gpus 0,2,5   # specific GPUs
+Supports **multi-GPU** — either auto-launched (recommended) or via torchrun:
+    python ppltest.py --nproc 8                            # auto-launch 8 GPUs (picks free port)
+    python ppltest.py --nproc 3 --gpus 4,5,6              # specific GPUs, free port
+    python ppltest.py                                      # single-GPU fallback
     python ppltest.py --gpus 3                             # single specific GPU
+
+    # Manual torchrun (you must pick a free port yourself if 29500 is taken):
+    torchrun --nproc_per_node=8 --master-port=29501 ppltest.py
+    torchrun --nproc_per_node=3 --master-port=29501 ppltest.py --gpus 0,2,5
 
 Predefined setups (same numbering as ppl_batch.py):
     python ppltest.py --list                               # list all setups
     python ppltest.py --setup 6                            # MXFP8 + MSD B=16
-    torchrun --nproc_per_node=3 ppltest.py --gpus 0,2,5 --setup 2
+    python ppltest.py --nproc 3 --gpus 4,5,6 --setup 2
 
 Each GPU loads a full model copy and processes a shard of the 578 sliding
 windows.  Partial NLL sums are aggregated via NCCL all_reduce.
@@ -52,6 +56,7 @@ from dist_utils import (
     gather_list,
     init_distributed,
     is_main,
+    maybe_relaunch_with_torchrun,
     restrict_gpus,
 )
 from ppl_batch import (
@@ -105,9 +110,13 @@ def precompute_windows(seq_len: int, max_length: int, stride: int):
 def main():
     # ── 0. Parse args & setup selection ──────────────────────────────────────
     parser = argparse.ArgumentParser(description="Perplexity evaluation (single setup)")
+    parser.add_argument("--nproc", type=int, default=None, metavar="N",
+                        help="Number of GPU workers. Auto-launches via torchrun "
+                             "with a free port (avoids EADDRINUSE). "
+                             "Replaces manual 'torchrun --nproc_per_node=N'.")
     parser.add_argument("--gpus", type=str, default=None,
-                        help="Comma-separated physical GPU IDs to use, e.g. '0,2,5'. "
-                             "Must match --nproc_per_node when using torchrun.")
+                        help="Comma-separated physical GPU IDs to use, e.g. '4,5,6,7'. "
+                             "Must match --nproc (or --nproc_per_node if using torchrun).")
     parser.add_argument("--setup", type=int, default=None, metavar="ID",
                         help="Use a predefined setup by ID (same numbering as ppl_batch.py). "
                              "See --list for available setups. If omitted, uses config.json as-is.")
@@ -139,6 +148,7 @@ def main():
             return
 
     restrict_gpus(args.gpus)
+    maybe_relaunch_with_torchrun(args.nproc)
 
     # ── 1. Distributed init ──────────────────────────────────────────────────
     rank, world_size, local_rank, device = init_distributed()
