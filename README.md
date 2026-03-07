@@ -184,45 +184,65 @@ Suggested sweep values: **8, 12, 16, 20, 24, 32**
 
 ## 3. Budget System Architecture
 
-The cycle budget $B$ determines how many clock cycles each output-channel accumulation runs before early termination. The system uses a **three-tier resolution** that combines offline calibration with runtime dynamic adjustment:
+The cycle budget *B* determines how many clock cycles each output-channel accumulation runs before early termination. The system uses a **three-tier resolution** that combines offline calibration with runtime dynamic adjustment:
 
 ### Tier A: Uniform Budget (default)
 
 When no calibration data is loaded, every output channel in every layer uses the same global budget:
 
-$$B_{\text{base}}[j] = \text{msd\_cycle\_budget} \quad \forall j$$
+> B_base[j] = `msd_cycle_budget`  for all j
 
 This is the simplest mode — set `msd_cycle_budget` in config.json and all channels get that budget. Used in Tier 2 and Tier 3 setups.
 
 ### Tier B: Calibrated Budget (per-channel, offline)
 
-When `msd_calibration_data` is present (produced by `calibrate.py`), each output channel gets its own $B_{\text{base}}$ determined by binary search over a target SNR:
+When `msd_calibration_data` is present (produced by `calibrate.py`), each output channel gets its own B_base determined by binary search over a target SNR:
 
-$$B_{\text{base}}[j] = \text{calibrated\_budget}[j] \quad \text{(per layer, per output channel)}$$
+> B_base[j] = calibrated_budget[j]  (per layer, per output channel)
+
+**Calibration data scope.** The budget search operates on *all activation samples collected during the calibration forward passes*, concatenated across batches.  Concretely, the total sample count fed to the per-channel search is:
+
+> N_cal = `--num-texts` × (tokens per text after padding/truncation to `--max-length`)
+
+With the defaults (`--num-texts 20`, `--max-length 512`, `--batch-size 4`), this yields N_cal ≈ 10 000 token positions per layer. The search computes SNR statistics **averaged over all N_cal samples**, so more data gives a more representative budget but costs more GPU memory.
+
+To change the calibration scope:
+- `--num-texts N` — number of paragraphs drawn from WikiText-2 validation (default 20)
+- `--max-length L` — max tokens per paragraph after tokenizer truncation (default 512)
+- `--batch-size B` — controls how many texts are processed per forward pass (default 4); does **not** change the total data volume, only the per-pass memory footprint
+
+**Memory implications.**  During the budget binary search, the dominant tensor is the 4D element-wise product `(N_cal, chunk, nb, bs)` where `chunk` is automatically sized to keep the tensor under 256 MiB (the `_CAL_CHUNK_TARGET_BYTES` constant in `calibration_msd.py`). However, the *collected block data* for each layer — `x_q (N_cal, nb, bs)` and `x_scales (N_cal, nb)` — is held on GPU until that layer's search finishes.  For the defaults (N_cal ≈ 10k, nb=32, bs=32, float32), this is about 40 MB per layer.  If you increase `--num-texts` or `--max-length` significantly (e.g., 200 texts × 2048 tokens → N_cal ≈ 400k), the per-layer block data grows to ~1.6 GB and the output-chunked search loop will still stay within the 256 MiB chunk limit, but you may need to lower `--batch-size` to avoid OOM during the forward passes themselves.
 
 **Algorithm** (in `calibration_msd.py`):
 1. Run forward passes over calibration data with MSD disabled (exact MXFP mode)
-2. Hook into each MXFP layer to collect block-quantized activations and weights
-3. For each output channel $j$, binary search over $B \in [4, 48]$ (12 iterations):
-  - At candidate budget $B$, compute truncated dot-product using the same \_msd\_truncate function used at inference
-  - Measure per-channel SNR: $\text{SNR}_j = 10 \log_{10}\frac{\text{signal\_power}_j}{\text{noise\_power}_j}$
-  - Adjust: if $\text{SNR}_j \geq \text{target\_snr\_db}$ → budget sufficient; else increase
-4. Return the minimum budget meeting the SNR target (conservative upper bound) plus per-channel dynamic range statistics
+2. Hook into each MXFP layer to collect block-quantized activations (x_q, x_scales) and weights (w_q, w_scales)
+3. For each output channel *j*, **binary search** over B ∈ [4, 48] (12 bisection iterations):
+   - Maintain `lo` (too small) and `hi` (sufficient) bounds, starting at lo=4, hi=48
+   - At each iteration: `mid = floor((lo + hi) / 2)`
+   - Compute truncated dot-product at budget=`mid` using the same `_msd_truncate` function used at inference
+   - Measure per-channel SNR: SNR_j = 10 · log10(signal_power_j / noise_power_j)  where signal_power = mean(exact²) and noise_power = mean((exact − truncated)²)
+   - If SNR_j ≥ `--target-snr` → budget is sufficient → `hi = mid` (search **downward** for a smaller sufficient budget)
+   - If SNR_j < `--target-snr` → budget is too small → `lo = mid + 1` (push upward)
+   - After 12 iterations, return `hi` — the **smallest budget that meets the SNR target**
+
+   This is a standard bisection that converges on the minimum sufficient budget because `hi` only decreases when the current midpoint already satisfies the SNR constraint. The invariant is: `hi` is always a known-good budget, `lo` is always one above a known-bad budget. After convergence, `hi` is the tightest upper bound, i.e., the minimum budget meeting the target.
+
+4. In a final pass, collect per-channel dynamic range statistics (see Section 5, "Interpreting Results") at the converged budget
 
 Channels with high activation dynamic range or large weight magnitudes get higher budgets; quiet channels get lower budgets — enabling hardware-native budget differentiation.
 
 ### Tier C: Dynamic Adjustment (runtime, always-on)
 
-On top of whichever $B_{\text{base}}$ is active (uniform or calibrated), a runtime dynamic delta is added based on the actual combined activation+weight scales observed during inference:
+On top of whichever B_base is active (uniform or calibrated), a runtime dynamic delta is added based on the actual combined activation+weight scales observed during inference:
 
-$$B_{\text{final}}[n,j] = B_{\text{base}}[j] + \Delta B[n,j]$$
+> B_final[n,j] = B_base[j] + ΔB[n,j]
 
 Where:
-- $E_{\text{combined}}[n,j] = \max_b \lfloor \log_2(x\_scale[n,b] \cdot w\_scale[j,b]) \rfloor$ — per (sample, output-channel)
-- **Linear mode** (default): $\Delta B = \alpha \cdot \max(0, E_{\text{combined}} - E_{\text{threshold}})$
-- **Step mode**: $\Delta B = \alpha$ if $E_{\text{combined}} > E_{\text{threshold}}$, else $0$
+- E_combined[n,j] = max over blocks *b* of floor(log2(x_scale[n,b] · w_scale[j,b]))  — per (sample, output-channel)
+- **Linear mode** (default): ΔB = α · max(0, E_combined − E_threshold)
+- **Step mode**: ΔB = α if E_combined > E_threshold, else 0
 
-With the default config ($\alpha = 1.0$, $E_{\text{threshold}} = 0.0$), $\Delta B$ equals the combined scale exponent, giving extra cycles to high-magnitude channels at runtime. This captures sample-dependent dynamic range that offline calibration cannot predict.
+With the default config (α = 1.0, E_threshold = 0.0), ΔB equals the combined scale exponent, giving extra cycles to high-magnitude channels at runtime. This captures sample-dependent dynamic range that offline calibration cannot predict.
 
 ### How the Tiers Compose
 
@@ -236,24 +256,24 @@ Tier A (uniform)  ──OR──  Tier B (calibrated)
       B_final[n,j]
 ```
 
-The \_resolve\_channel\_budgets() method in \_MXFPLinearBase implements this composition:
+The `_resolve_channel_budgets()` method in `_MXFPLinearBase` implements this composition:
 1. Load B_base from calibration data (Tier B) or uniform config (Tier A)
 2. Compute delta_b from combined log2 scales (Tier C)
-3. Return B_final = B_base + delta_b with shape (N, out) — per-sample, per-output-channel
+3. Return B_final = B_base + delta_b with shape `(N, out)` — per-sample, per-output-channel
 
 ### Config Fields Reference
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `use_msd_truncation` | bool | false | Master switch for MSD simulation |
-| `msd_cycle_budget` | int | 16 | Global default cycle budget $B_{\text{base}}$ (Tier A) |
-| `msd_online_delay` | int | 2 | MSD multiplier online delay $\delta$ (digits before first valid product) |
-| `msd_budget_dynamic_scale` | float | 1.0 | $\alpha$ for Tier C dynamic adjustment |
-| `msd_budget_dynamic_threshold` | float | 0.0 | $E_{\text{threshold}}$ for Tier C dynamic adjustment |
+| `msd_cycle_budget` | int | 16 | Global default cycle budget B_base (Tier A) |
+| `msd_online_delay` | int | 2 | MSD multiplier online delay δ (digits before first valid product) |
+| `msd_budget_dynamic_scale` | float | 1.0 | α for Tier C dynamic adjustment |
+| `msd_budget_dynamic_threshold` | float | 0.0 | E_threshold for Tier C dynamic adjustment |
 | `msd_budget_dynamic_mode` | str | "linear" | `"linear"` or `"step"` for Tier C mode |
 | `msd_deep_pipeline` | bool | false | Enable MSD streaming through MLP (gate→silu→×up→down) |
 | `msd_pipeline_precision_loss` | int | 2 | Digits of precision lost per pipeline stage |
-| `msd_calibration_data` | dict/null | null | Per-layer per-channel calibrated $B_{\text{base}}$ (Tier B) |
+| `msd_calibration_data` | dict/null | null | Per-layer per-channel calibrated B_base (Tier B) |
 
 ---
 
