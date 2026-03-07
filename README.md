@@ -190,7 +190,7 @@ The cycle budget $B$ determines how many clock cycles each output-channel accumu
 
 When no calibration data is loaded, every output channel in every layer uses the same global budget:
 
-$$B_{\text{base}}[j] = \texttt{msd\_cycle\_budget} \quad \forall j$$
+$$B_{\text{base}}[j] = \text{msd\_cycle\_budget} \quad \forall j$$
 
 This is the simplest mode — set `msd_cycle_budget` in config.json and all channels get that budget. Used in Tier 2 and Tier 3 setups.
 
@@ -204,9 +204,9 @@ $$B_{\text{base}}[j] = \text{calibrated\_budget}[j] \quad \text{(per layer, per 
 1. Run forward passes over calibration data with MSD disabled (exact MXFP mode)
 2. Hook into each MXFP layer to collect block-quantized activations and weights
 3. For each output channel $j$, binary search over $B \in [4, 48]$ (12 iterations):
-   - At candidate budget $B$, compute truncated dot-product using the same `_msd_truncate` function used at inference
-   - Measure per-channel SNR: $\text{SNR}_j = 10 \log_{10}\frac{\text{signal\_power}_j}{\text{noise\_power}_j}$
-   - Adjust: if $\text{SNR}_j \geq \text{target\_snr\_db}$ → budget sufficient; else increase
+  - At candidate budget $B$, compute truncated dot-product using the same \_msd\_truncate function used at inference
+  - Measure per-channel SNR: $\text{SNR}_j = 10 \log_{10}\frac{\text{signal\_power}_j}{\text{noise\_power}_j}$
+  - Adjust: if $\text{SNR}_j \geq \text{target\_snr\_db}$ → budget sufficient; else increase
 4. Return the minimum budget meeting the SNR target (conservative upper bound) plus per-channel dynamic range statistics
 
 Channels with high activation dynamic range or large weight magnitudes get higher budgets; quiet channels get lower budgets — enabling hardware-native budget differentiation.
@@ -228,18 +228,18 @@ With the default config ($\alpha = 1.0$, $E_{\text{threshold}} = 0.0$), $\Delta 
 
 ```
 Tier A (uniform)  ──OR──  Tier B (calibrated)
-            │                     │
-            └─── B_base[j] ──────┘
-                      │
-              + Tier C (dynamic Δ)  ← always applied
-                      │
-                  B_final[n,j]
+      │                     │
+      └─── B_base[j] ──────┘
+          │
+        + Tier C (dynamic Δ)  ← always applied
+          │
+      B_final[n,j]
 ```
 
-The `_resolve_channel_budgets()` method in `_MXFPLinearBase` implements this composition:
-1. Load `B_base` from calibration data (Tier B) or uniform config (Tier A)
-2. Compute `delta_b` from combined log2 scales (Tier C)
-3. Return `B_final = B_base + delta_b` with shape `(N, out)` — per-sample, per-output-channel
+The \_resolve\_channel\_budgets() method in \_MXFPLinearBase implements this composition:
+1. Load B_base from calibration data (Tier B) or uniform config (Tier A)
+2. Compute delta_b from combined log2 scales (Tier C)
+3. Return B_final = B_base + delta_b with shape (N, out) — per-sample, per-output-channel
 
 ### Config Fields Reference
 
