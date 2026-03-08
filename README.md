@@ -635,14 +635,19 @@ Each `calibration_{tag}.json` contains:
       "inter_delay_mean": [2.1, 1.8, 3.0, ...],
       "intra_delay_mean": 2.3,
       "eff_precision_mean": [10.5, 11.0, 9.2, ...],
-      "eff_precision_min":  [4.0, 5.0, 3.0, ...]
+      "eff_precision_min":  [4.0, 5.0, 3.0, ...],
+      "snr_at_budget":     [30.5, 31.2, 30.0, ...],
+      "signal_power_db":   [-12.3, -8.1, -15.0, ...]
     },
     ...
   }
 }
 ```
 
-**`channel_stats`** provides per-channel dynamic range statistics vital for hardware design:
+**`channel_stats`** provides per-channel dynamic range statistics vital for hardware design.
+Statistics are partitioned into **budget-independent** (intrinsic to data) and **budget-dependent** (characterize the converged budget) groups:
+
+**Budget-independent** (data-intrinsic, useful regardless of budget):
 
 | Stat | Shape | Description |
 |------|-------|-------------|
@@ -651,10 +656,17 @@ Each `calibration_{tag}.json` contains:
 | `e_combined_std` | per-channel | Standard deviation — shows variability |
 | `inter_delay_mean` | per-channel | Average inter-block delay (block scale differences) |
 | `intra_delay_mean` | scalar | Average intra-block delay (element-level exponent spread) |
+| `signal_power_db` | per-channel | 10·log10(mean(exact_dot²)) — intrinsic magnitude scale |
+| `snr_at_budget` | per-channel | Actual SNR (dB) achieved at the converged budget — validates that target_snr_db is met |
+
+**Budget-dependent** (characterize the converged B_base):
+
+| Stat | Shape | Description |
+|------|-------|-------------|
 | `eff_precision_mean` | per-channel | Average effective precision = B − total_delay |
 | `eff_precision_min` | per-channel | Worst-case effective precision (minimum across elements and samples) |
 
-Channels with large `e_combined` have high result magnitudes and get higher budgets; channels with high `inter_delay_mean` lose more cycles to alignment. The `eff_precision_mean` is the actual number of accurate BSD digits produced — the key metric for understanding truncation quality.
+Channels with large `e_combined` have high result magnitudes and get higher budgets; channels with high `inter_delay_mean` lose more cycles to alignment. The `snr_at_budget` is the primary validation metric — it should be ≥ `target_snr_db` for every channel. The `signal_power_db` shows the intrinsic magnitude scale and correlates with the budget assigned.
 
 ### To Remove Calibration
 
@@ -665,6 +677,102 @@ set `msd_calibration_data` to `null` to revert to uniform budgets:
   "msd_calibration_data": null
 }
 ```
+
+---
+
+## 5b. Inference Performance Statistics (MSD Hardware Model)
+
+When MSD truncation is active during PPL evaluation, hierarchical performance statistics
+are automatically collected and saved in the result JSON under `msd_perf_stats`. These
+statistics reflect **actual runtime behaviour** during inference (not calibration-time
+properties) and are designed to feed future hardware simulation.
+
+### Hierarchy
+
+The statistics cover four levels, from fine to coarse:
+
+| Level | Granularity | What it measures |
+|-------|-------------|------------------|
+| **Bit level** | per-element | Effective precision (p_eff) distribution — how many BSD digits each partial product actually computed |
+| **Block level** | per-block (n,j,b) | Zero / partial / full block activation — a block is "zero" if all its elements have p_eff=0 (fully skipped) |
+| **Channel level** | per-output-channel | Total budget cycles vs effective cycles consumed, utilization ratio |
+| **Global** | whole-model | Aggregate sparsity ratios, mean precision, block breakdown |
+
+### Output Structure
+
+In the PPL result JSON (`ppl_results_*.json`):
+
+```json
+{
+  "msd_perf_stats": {
+    "global": {
+      "num_layers": 84,
+      "total_elements": 123456789,
+      "zero_elements": 12345,
+      "zero_element_ratio": 0.0001,
+      "mean_effective_precision": 12.30,
+      "global_utilization": 0.7500,
+      "total_blocks": 1234567,
+      "zero_blocks": 1234,
+      "zero_block_ratio": 0.001,
+      "partial_blocks": 234567,
+      "partial_block_ratio": 0.19,
+      "full_blocks": 998766,
+      "full_block_ratio": 0.809
+    },
+    "per_layer": {
+      "model.layers.0.mlp.gate_proj": {
+        "bit_level": {
+          "p_eff_mean": [...],
+          "p_eff_std": [...],
+          "p_eff_histogram": {
+            "bin_labels": ["0", "1-4", "5-8", "9-12", "13-16", "17-24", "25-32", "33+"],
+            "counts": [[...], ...]
+          }
+        },
+        "block_level": {
+          "zero_block_count": [...],
+          "partial_block_count": [...],
+          "full_block_count": [...],
+          "zero_block_ratio": [...],
+          "partial_block_ratio": [...],
+          "full_block_ratio": [...]
+        },
+        "channel_level": {
+          "total_budget_cycles": [...],
+          "effective_cycles": [...],
+          "skipped_cycles": [...],
+          "utilization": [...]
+        }
+      }
+    }
+  }
+}
+```
+
+### Interpreting the Statistics
+
+- **Zero element ratio:** Fraction of partial products that were completely skipped (p_eff=0). These elements contribute zero energy cost. Higher = more energy savings.
+- **Zero block ratio:** Fraction of blocks where ALL elements were skipped. These blocks can be entirely gated in hardware for maximum energy savings.
+- **Partial block ratio:** Blocks where some but not all elements computed — partial energy savings.
+- **Utilization:** Ratio of effective cycles to total budget cycles. Lower utilization = more early termination = more energy savings.
+- **p_eff histogram:** Distribution of effective precision values. Peaks at low values indicate aggressive early termination; peaks at high values indicate the budget is well-utilized.
+
+### Design Intent
+
+These statistics serve a different purpose from the calibration statistics (Section 5):
+
+| Aspect | Calibration Stats (Section 5) | Inference Perf Stats (Section 5b) |
+|--------|-------------------------------|-----------------------------------|
+| **Phase** | Offline budget search | Runtime inference |
+| **Purpose** | Validate budget quality (SNR target met?) | Hardware simulation (latency, energy) |
+| **Perspective** | Algorithm quality | Hardware behaviour |
+| **Key metric** | snr_at_budget (dB) | utilization, zero_block_ratio |
+| **Conversion** | Budget → SNR | Statistics → latency/energy (future) |
+
+The conversion from these raw statistics to actual latency (ns) and energy (pJ) is left for
+future work and will depend on the specific hardware implementation (clock frequency, voltage,
+gate-level power model).
 
 ---
 
