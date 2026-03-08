@@ -23,10 +23,13 @@ Usage:
     cleanup_distributed()
 """
 
+import logging
 import os
+import re
 import socket
 import sys
 import time
+import warnings
 from pathlib import Path
 
 import torch
@@ -148,6 +151,10 @@ def maybe_relaunch_with_torchrun(nproc: int | None, extra_env: dict | None = Non
             pass             # drop --nproc=N
         else:
             script_argv.append(tok)
+
+    # Pre-set OMP_NUM_THREADS to suppress the noisy banner from
+    # torch.distributed.run ("Setting OMP_NUM_THREADS ... for each process")
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
 
     cmd = [
         sys.executable, "-m", "torch.distributed.run",
@@ -307,3 +314,60 @@ def gather_list(local_list: list, rank: int, world_size: int) -> list:
             merged.extend(g)
         return merged
     return []
+
+
+def suppress_warnings(rank: int = 0) -> None:
+    """
+    Suppress noisy warnings from PyTorch distributed, HuggingFace, and
+    tokenizers that clutter multi-GPU terminal output.
+
+    Call this **after** ``init_distributed()`` / ``init_distributed_lite()``
+    so that *rank* is known.
+
+    On **all ranks**:
+      - PyTorch c10d socket hostname warnings
+      - NCCL device-guessing warnings
+      - ``barrier(): using the device under current context`` warning
+      - ``torch_dtype is deprecated`` deprecation warning
+      - ``tie_word_embeddings`` / tied-weights warnings
+      - ``Token indices sequence length is longer than`` warnings
+      - Tokenizer parallelism fork-safety warning
+
+    On **non-main ranks** (rank > 0), additionally:
+      - HuggingFace transformers logging set to ERROR (suppresses model-
+        loading progress bars and info messages)
+      - Python logging for ``transformers`` set to ERROR
+    """
+    # ── Tokenizer parallelism (env var must be set before tokenizer import) ──
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+    # ── Python warnings module filters ──
+    # PyTorch distributed / c10d
+    warnings.filterwarnings("ignore", message=r".*hostname of the client socket cannot be retrieved.*")
+    warnings.filterwarnings("ignore", message=r".*Guessing device ID based on global rank.*")
+    warnings.filterwarnings("ignore", message=r".*barrier\(\): using the device under current context.*")
+    # Transformers
+    warnings.filterwarnings("ignore", message=r".*torch_dtype.*is deprecated.*")
+    warnings.filterwarnings("ignore", message=r".*tie_word_embeddings.*")
+    warnings.filterwarnings("ignore", message=r".*tied weights mapping.*")
+    warnings.filterwarnings("ignore", message=r".*Token indices sequence length is longer.*")
+    # HF Hub
+    warnings.filterwarnings("ignore", message=r".*unauthenticated requests.*")
+
+    # ── C++ level warnings (torch c10d logger writes to stderr directly) ──
+    # These are emitted via PyTorch's internal C++ logger, not Python warnings.
+    # We suppress them by raising the torch C++ log level.
+    os.environ.setdefault("TORCH_CPP_LOG", "ERROR")
+    # Specifically silence the NCCL c10d logger
+    os.environ.setdefault("NCCL_DEBUG", "WARN")
+
+    # ── Non-main ranks: silence HuggingFace verbosity ──
+    if rank > 0:
+        try:
+            import transformers.utils.logging as hf_logging
+            hf_logging.set_verbosity_error()
+        except ImportError:
+            pass
+        # Also suppress Python-level logging from transformers
+        logging.getLogger("transformers").setLevel(logging.ERROR)
+        logging.getLogger("datasets").setLevel(logging.ERROR)

@@ -58,12 +58,19 @@ from dist_utils import (
     is_main,
     maybe_relaunch_with_torchrun,
     restrict_gpus,
+    suppress_warnings,
 )
-from ppl_batch import (
+from experiment_config import (
+    BASELINE_CONFIG,
     SETUPS,
-    _BASELINE_OVERRIDES,
     apply_config,
+    format_config_banner,
+    get_active_flags,
+    get_config_snapshot,
+    peak_memory_str,
     reconfigure_mlp_layers,
+    reset_peak_memory,
+    reset_to_baseline,
 )
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -73,19 +80,6 @@ MAX_LENGTH  = 4096   # max context window fed to the model
 STRIDE      = 512    # sliding-window stride (<= MAX_LENGTH)
 RESULTS_OUT = "ppl_results_MXFP8_MSD_B16.json"
 # ─────────────────────────────────────────────────────────────────────────────
-
-
-def peak_memory_str(device: torch.device) -> str:
-    """Return peak allocated memory as a human-readable string."""
-    if device.type == "cuda":
-        bytes_ = torch.cuda.max_memory_allocated(device)
-        return f"{bytes_ / 1024**3:.2f} GB"
-    return "N/A (CPU)"
-
-
-def reset_peak_memory(device: torch.device):
-    if device.type == "cuda":
-        torch.cuda.reset_peak_memory_stats(device)
 
 
 def precompute_windows(seq_len: int, max_length: int, stride: int):
@@ -126,6 +120,10 @@ def main():
                         help="Override output JSON filename "
                              "(default: auto-generated from setup tag, "
                              "or RESULTS_OUT constant if --setup is not used)")
+    parser.add_argument("--calibration", type=str, default=None, metavar="FILE",
+                        help="Path to calibration JSON file (e.g. calibration_MXFP8.json). "
+                             "Injects per-channel budgets into the model config. "
+                             "Requires --setup with an MSD-enabled setup.")
     args = parser.parse_args()
 
     # ── List mode (no GPU needed) ──
@@ -147,11 +145,29 @@ def main():
                   f"Valid IDs: {[s[0] for s in SETUPS]}. Use --list to see all.")
             return
 
+    # ── Validate --calibration ──
+    if args.calibration is not None and args.setup is None:
+        print("Error: --calibration requires --setup to select an MSD-enabled setup.")
+        return
+    cal_data_dict = None
+    if args.calibration is not None:
+        cal_path = Path(args.calibration)
+        if not cal_path.exists():
+            print(f"Error: calibration file not found: {cal_path}")
+            return
+        with open(cal_path) as f:
+            cal_json = json.load(f)
+        cal_data_dict = cal_json.get("msd_calibration_data")
+        if not cal_data_dict:
+            print(f"Error: no 'msd_calibration_data' key in {cal_path}")
+            return
+
     restrict_gpus(args.gpus)
     maybe_relaunch_with_torchrun(args.nproc)
 
     # ── 1. Distributed init ──────────────────────────────────────────────────
     rank, world_size, local_rank, device = init_distributed()
+    suppress_warnings(rank)
     dtype = torch.float16 if device.type == "cuda" else torch.float32
 
     if is_main(rank):
@@ -163,7 +179,7 @@ def main():
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, local_files_only=True)
 
-    model_kwargs: dict = {"local_files_only": True, "torch_dtype": dtype}
+    model_kwargs: dict = {"local_files_only": True, "dtype": dtype}
     # Each rank loads onto its own GPU -- no device_map="auto"
     model = AutoModelForCausalLM.from_pretrained(MODEL_PATH, **model_kwargs)
     model.to(device)
@@ -177,24 +193,36 @@ def main():
     # ── 3. Apply setup config (if --setup given) ─────────────────────────────
     if selected_setup is not None:
         sid, tag, desc, overrides = selected_setup
-        apply_config(model.config, _BASELINE_OVERRIDES)
+        reset_to_baseline(model.config)
         apply_config(model.config, overrides)
         reconfigure_mlp_layers(model, device)
         if is_main(rank):
-            active_flags = []
-            for k in ["use_mxfp8", "use_mxfp6", "use_mxfp4", "use_msd_truncation",
-                       "msd_cycle_budget", "msd_deep_pipeline"]:
-                v = getattr(model.config, k, None)
-                if v is not None and v is not False:
-                    active_flags.append(f"{k}={v}")
-            print(f"Setup #{sid}: {desc}")
-            print(f"Config: {', '.join(active_flags) or '(baseline fp16)'}")
+            print(format_config_banner(model.config, setup_id=sid, setup_desc=desc))
+
+    # ── 3b. Inject calibration data (if --calibration given) ─────────────────
+    if cal_data_dict is not None:
+        # Ensure MSD truncation is enabled
+        if not getattr(model.config, "use_msd_truncation", False):
+            print("Warning: --calibration given but setup has use_msd_truncation=False. "
+                  "Enabling MSD truncation.")
+            model.config.use_msd_truncation = True
+        model.config.msd_calibration_data = cal_data_dict
+        # Invalidate MSD context so it rebuilds with calibrated budgets
+        if hasattr(model, "_msd_context"):
+            model._msd_context = None
+            model._msd_context_config_hash = None
+        if is_main(rank):
+            n_layers = len(cal_data_dict)
+            n_channels = sum(len(v) for v in cal_data_dict.values())
+            print(f"Calibration loaded: {args.calibration} ({n_layers} layers, {n_channels} channels)")
 
     # Determine output filename
     if args.output:
         results_out = args.output
     elif selected_setup is not None:
-        results_out = f"ppl_results_{selected_setup[1]}.json"
+        tag = selected_setup[1]
+        calib_suffix = "_calib" if cal_data_dict is not None else ""
+        results_out = f"ppl_results_{tag}{calib_suffix}.json"
     else:
         results_out = RESULTS_OUT
 
@@ -303,7 +331,9 @@ def main():
             "model": MODEL_PATH,
             "dataset": f"{ds_name}/{ds_config}/{ds_split}",
             "config": {"max_length": MAX_LENGTH, "stride": STRIDE, "dtype": str(dtype),
-                       "world_size": world_size},
+                       "world_size": world_size,
+                       "calibration_file": args.calibration if args.calibration else None},
+            "config_snapshot": get_config_snapshot(model.config),
             "metrics": {
                 "token_perplexity": round(token_ppl, 4),
                 "word_perplexity":  round(word_ppl,  4),
@@ -328,6 +358,10 @@ def main():
         with open(out_path, "w") as f:
             json.dump(results, f, indent=2)
         print(f"\nResults saved -> {out_path}")
+
+    # ── 9. Cleanup calibration data from config ─────────────────────────────
+    if cal_data_dict is not None:
+        model.config.msd_calibration_data = None
 
     cleanup_distributed()
 

@@ -55,7 +55,23 @@ from dist_utils import (
     is_main,
     maybe_relaunch_with_torchrun,
     restrict_gpus,
+    suppress_warnings,
 )
+from experiment_config import (
+    BASELINE_CONFIG,
+    SETUPS,
+    apply_config,
+    format_config_banner,
+    get_active_flags,
+    get_config_snapshot,
+    peak_memory_str,
+    reconfigure_mlp_layers,
+    reset_peak_memory,
+    reset_to_baseline,
+)
+
+# Re-export for backward compatibility (calibrate.py, ppltest.py may import these)
+_BASELINE_OVERRIDES = BASELINE_CONFIG
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 MODEL_PATH  = "../Qwen3-0.6B"
@@ -64,161 +80,8 @@ MAX_LENGTH  = 4096
 STRIDE      = 512
 RESULTS_DIR = Path(__file__).parent   # save next to this script
 
-# ── Setup definitions ─────────────────────────────────────────────────────────
-# Each setup is (id, tag, description, config_overrides_dict)
-# config_overrides are applied ON TOP of a clean baseline (all mxfp/msd off).
-
-_MSD_DEFAULTS = {
-    "use_msd_truncation": True,
-    "msd_cycle_budget": 16,
-    "msd_online_delay": 2,
-    "msd_budget_dynamic_scale": 0.0,
-    "msd_budget_dynamic_threshold": 0.0,
-    "msd_budget_dynamic_mode": "linear",
-    "msd_deep_pipeline": False,
-    "msd_pipeline_precision_loss": 2,
-    "msd_calibration_data": None,
-}
-
-def _msd(budget=16, pipeline=False, **extra):
-    d = dict(_MSD_DEFAULTS)
-    d["msd_cycle_budget"] = budget
-    d["msd_deep_pipeline"] = pipeline
-    d.update(extra)
-    return d
-
-
-SETUPS = [
-    # ── Tier 1: Baseline & MX-only ──
-    (1,  "baseline",          "FP16 baseline (no quantization)",
-     {"use_mxfp8": False, "use_mxfp6": False, "use_mxfp4": False}),
-
-    (2,  "MXFP8",             "MXFP8 only",
-     {"use_mxfp8": True}),
-
-    (3,  "MXFP6_E2M3",       "MXFP6 E2M3 only",
-     {"use_mxfp6": True, "mxfp6_format": "e2m3"}),
-
-    (4,  "MXFP6_E3M2",       "MXFP6 E3M2 only",
-     {"use_mxfp6": True, "mxfp6_format": "e3m2"}),
-
-    (5,  "MXFP4",             "MXFP4 only",
-     {"use_mxfp4": True}),
-
-    # ── Tier 2: MSD default budget (B=16) across formats ──
-    (6,  "MXFP8_MSD_B16",    "MXFP8 + MSD B=16",
-     {"use_mxfp8": True, **_msd(16)}),
-
-    (7,  "MXFP6_E2M3_MSD_B16", "MXFP6 E2M3 + MSD B=16",
-     {"use_mxfp6": True, "mxfp6_format": "e2m3", **_msd(16)}),
-
-    (8,  "MXFP6_E3M2_MSD_B16", "MXFP6 E3M2 + MSD B=16",
-     {"use_mxfp6": True, "mxfp6_format": "e3m2", **_msd(16)}),
-
-    (9,  "MXFP4_MSD_B16",    "MXFP4 + MSD B=16",
-     {"use_mxfp4": True, **_msd(16)}),
-
-    # ── Tier 3: Budget sweep (MXFP8) ──
-    (10, "MXFP8_MSD_B8",     "MXFP8 + MSD B=8",
-     {"use_mxfp8": True, **_msd(8)}),
-
-    (11, "MXFP8_MSD_B12",    "MXFP8 + MSD B=12",
-     {"use_mxfp8": True, **_msd(12)}),
-
-    # (B=16 already covered by setup #6)
-
-    (12, "MXFP8_MSD_B20",    "MXFP8 + MSD B=20",
-     {"use_mxfp8": True, **_msd(20)}),
-
-    (13, "MXFP8_MSD_B24",    "MXFP8 + MSD B=24",
-     {"use_mxfp8": True, **_msd(24)}),
-
-    (14, "MXFP8_MSD_B32",    "MXFP8 + MSD B=32",
-     {"use_mxfp8": True, **_msd(32)}),
-
-    # ── Tier 3b: Budget sweep (MXFP4) ──
-    (15, "MXFP4_MSD_B8",     "MXFP4 + MSD B=8",
-     {"use_mxfp4": True, **_msd(8)}),
-
-    (16, "MXFP4_MSD_B12",    "MXFP4 + MSD B=12",
-     {"use_mxfp4": True, **_msd(12)}),
-
-    # (B=16 already covered by setup #9)
-
-    (17, "MXFP4_MSD_B20",    "MXFP4 + MSD B=20",
-     {"use_mxfp4": True, **_msd(20)}),
-
-    (18, "MXFP4_MSD_B24",    "MXFP4 + MSD B=24",
-     {"use_mxfp4": True, **_msd(24)}),
-
-    (19, "MXFP4_MSD_B32",    "MXFP4 + MSD B=32",
-     {"use_mxfp4": True, **_msd(32)}),
-
-    # ── Tier 4: Deep pipeline ──
-    (20, "MXFP8_MSD_B16_pipeline", "MXFP8 + MSD B=16 + pipeline",
-     {"use_mxfp8": True, **_msd(16, pipeline=True)}),
-
-    (21, "MXFP4_MSD_B16_pipeline", "MXFP4 + MSD B=16 + pipeline",
-     {"use_mxfp4": True, **_msd(16, pipeline=True)}),
-]
-
-
-# ── Baseline config (everything off) ─────────────────────────────────────────
-_BASELINE_OVERRIDES = {
-    "use_mxfp8": False, "use_mxfp6": False, "use_mxfp4": False,
-    "use_msd_truncation": False, "msd_deep_pipeline": False,
-    "msd_calibration_data": None,
-}
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-
-def reconfigure_mlp_layers(model, device):
-    """
-    Replace every MLP linear layer with the correct type for the current config.
-
-    ``_make_linear()`` is called at model construction and bakes in the linear
-    class (MXFP8Linear, MXFP6Linear, MXFP4Linear, or nn.Linear).  Changing
-    ``model.config`` later does NOT change the existing layer objects.  This
-    function walks all MLP modules and rebuilds the three projections to
-    match the current config, sharing the weight tensor so no data is copied.
-    """
-    from transformers.models.qwen3.modeling_qwen3 import _make_linear, Qwen3MLP
-
-    config = model.config
-    for module in model.modules():
-        if not isinstance(module, Qwen3MLP):
-            continue
-        for attr in ("gate_proj", "up_proj", "down_proj"):
-            old = getattr(module, attr)
-            new = _make_linear(old.in_features, old.out_features, config)
-            new.weight = old.weight  # share the nn.Parameter (no copy)
-            if hasattr(old, "bias_param") and old.bias_param is not None:
-                new.bias_param = old.bias_param
-            new = new.to(device)
-            setattr(module, attr, new)
-
-    # Invalidate MSD context so it re-walks modules & re-sets layer_name etc.
-    if hasattr(model, "_msd_context"):
-        model._msd_context = None
-        model._msd_context_config_hash = None
-
-
-def peak_memory_str(device):
-    if device.type == "cuda":
-        return f"{torch.cuda.max_memory_allocated(device) / 1024**3:.2f} GB"
-    return "N/A"
-
-
-def reset_peak_memory(device):
-    if device.type == "cuda":
-        torch.cuda.reset_peak_memory_stats(device)
-
-
-def apply_config(config, overrides):
-    """Apply a dict of overrides to a model config (in-place)."""
-    for k, v in overrides.items():
-        setattr(config, k, v)
 
 
 def evaluate_ppl(model, encodings, device, seq_len, num_words, num_chars, num_bytes,
@@ -307,6 +170,7 @@ def main():
 
     # ── Distributed init (no NCCL — ranks work independently) ──
     rank, world_size, local_rank, device = init_distributed_lite()
+    suppress_warnings(rank)
     dtype = torch.float16 if device.type == "cuda" else torch.float32
 
     # ── List mode (rank 0 only, then exit) ──
@@ -347,7 +211,7 @@ def main():
         print("Loading tokenizer & model ...")
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, local_files_only=True)
-    model_kwargs = {"local_files_only": True, "torch_dtype": dtype}
+    model_kwargs = {"local_files_only": True, "dtype": dtype}
     model = AutoModelForCausalLM.from_pretrained(MODEL_PATH, **model_kwargs)
     model.to(device)
     model.eval()
@@ -394,20 +258,16 @@ def main():
             continue
 
         # Reset to baseline, then apply this setup's overrides
-        apply_config(model.config, _BASELINE_OVERRIDES)
+        reset_to_baseline(model.config)
         apply_config(model.config, overrides)
 
         # Rebuild MLP linear layers to match the new config flags
         reconfigure_mlp_layers(model, device)
 
         # Show active config
-        active_flags = []
-        for k in ["use_mxfp8", "use_mxfp6", "use_mxfp4", "use_msd_truncation",
-                   "msd_cycle_budget", "msd_deep_pipeline"]:
-            v = getattr(model.config, k, None)
-            if v is not None and v is not False:
-                active_flags.append(f"{k}={v}")
-        print(f"[rank {rank}]   Config: {', '.join(active_flags) or '(baseline fp16)'}")
+        banner = format_config_banner(model.config, setup_id=sid, setup_desc=desc)
+        for line in banner.splitlines():
+            print(f"[rank {rank}]   {line}")
 
         # Evaluate
         results = evaluate_ppl(model, encodings, device, seq_len,
@@ -421,7 +281,8 @@ def main():
         results["model"] = MODEL_PATH
         results["dataset"] = f"{ds_name}/{ds_config}/{ds_split}"
         results["config"] = {"max_length": MAX_LENGTH, "stride": STRIDE,
-                             "dtype": str(dtype)}
+                             "dtype": str(dtype), "world_size": world_size}
+        results["config_snapshot"] = get_config_snapshot(model.config)
 
         # Save
         with open(result_file, "w") as f:
