@@ -103,7 +103,21 @@ def precompute_windows(seq_len: int, max_length: int, stride: int):
 
 def main():
     # ── 0. Parse args & setup selection ──────────────────────────────────────
-    parser = argparse.ArgumentParser(description="Perplexity evaluation (single setup)")
+    parser = argparse.ArgumentParser(
+        description="Perplexity evaluation (single setup)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""\
+examples:
+  python ppltest.py --list                                # list all setups
+  python ppltest.py --nproc 8 --setup 6                   # MXFP8 + MSD B=16
+  python ppltest.py --nproc 4 --gpus 4,5,6,7 --setup 6   # specific GPUs
+  python ppltest.py --setup 6 --calibration calibration_MXFP8.json
+
+calibration workflow:
+  1. python calibrate.py --setup 1          # produce calibration_MXFP8.json
+  2. python ppltest.py --setup 6 --calibration calibration_MXFP8.json
+""",
+    )
     parser.add_argument("--nproc", type=int, default=None, metavar="N",
                         help="Number of GPU workers. Auto-launches via torchrun "
                              "with a free port (avoids EADDRINUSE). "
@@ -121,9 +135,12 @@ def main():
                              "(default: auto-generated from setup tag, "
                              "or RESULTS_OUT constant if --setup is not used)")
     parser.add_argument("--calibration", type=str, default=None, metavar="FILE",
-                        help="Path to calibration JSON file (e.g. calibration_MXFP8.json). "
-                             "Injects per-channel budgets into the model config. "
-                             "Requires --setup with an MSD-enabled setup.")
+                        help="Path to calibration JSON file (produced by calibrate.py). "
+                             "Injects per-channel B_base budgets into the model config, "
+                             "replacing the uniform msd_cycle_budget with per-channel "
+                             "Tier B budgets. Requires --setup with an MSD-enabled setup "
+                             "(use_msd_truncation will be auto-enabled with a warning "
+                             "if not). Example: --calibration calibration_MXFP8.json")
     args = parser.parse_args()
 
     # ── List mode (no GPU needed) ──
@@ -287,6 +304,11 @@ def main():
     # Gather per-chunk NLLs for reliability stats (all -> rank 0)
     all_chunk_nlls = gather_list(local_chunk_nlls, rank, world_size)
 
+    # ── 7b. Collect MSD performance statistics (rank 0 only) ─────────────────
+    msd_perf = None
+    if is_main(rank) and hasattr(model, "get_perf_stats"):
+        msd_perf = model.get_perf_stats()
+
     # ── 8. Compute & report metrics (rank 0 only) ───────────────────────────
     if is_main(rank):
         mean_nll = total_nll_sum / total_tokens
@@ -354,6 +376,21 @@ def main():
             },
         }
 
+        # ── 8b. Attach MSD performance statistics if available ────────────────
+        if msd_perf is not None:
+            results["msd_perf_stats"] = msd_perf
+            g = msd_perf.get("global", {})
+            print(f"\n{'MSD PERFORMANCE STATISTICS':^52}")
+            print(SEP)
+            print(f"  Layers profiled  : {g.get('num_layers', 0)}")
+            print(f"  Zero elements    : {g.get('zero_element_ratio', 0):.4%}")
+            print(f"  Mean eff. prec.  : {g.get('mean_effective_precision', 0):.2f} digits")
+            print(f"  Global util.     : {g.get('global_utilization', 0):.4%}")
+            print(f"  Zero blocks      : {g.get('zero_block_ratio', 0):.4%}")
+            print(f"  Partial blocks   : {g.get('partial_block_ratio', 0):.4%}")
+            print(f"  Full blocks      : {g.get('full_block_ratio', 0):.4%}")
+            print(SEP)
+
         out_path = Path(__file__).parent / results_out
         with open(out_path, "w") as f:
             json.dump(results, f, indent=2)
@@ -362,7 +399,9 @@ def main():
     # ── 9. Cleanup calibration data from config ─────────────────────────────
     if cal_data_dict is not None:
         model.config.msd_calibration_data = None
-
+    # Reset perf stats after saving
+    if hasattr(model, "reset_perf_stats"):
+        model.reset_perf_stats()
     cleanup_distributed()
 
 

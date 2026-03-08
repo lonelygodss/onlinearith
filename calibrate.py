@@ -250,11 +250,17 @@ def main():
         # Aggregate channel stats across all layers for the summary
         all_e_combined = []
         all_eff_prec = []
+        all_snr = []
+        all_signal_power = []
         for layer_st in channel_stats.values():
             if isinstance(layer_st.get("e_combined_mean"), list):
                 all_e_combined.extend(layer_st["e_combined_mean"])
             if isinstance(layer_st.get("eff_precision_mean"), list):
                 all_eff_prec.extend(layer_st["eff_precision_mean"])
+            if isinstance(layer_st.get("snr_at_budget"), list):
+                all_snr.extend(layer_st["snr_at_budget"])
+            if isinstance(layer_st.get("signal_power_db"), list):
+                all_signal_power.extend(layer_st["signal_power_db"])
 
         result = {
             "format": tag,
@@ -276,6 +282,9 @@ def main():
                 "e_combined_mean": round(sum(all_e_combined) / len(all_e_combined), 2) if all_e_combined else None,
                 "e_combined_range": [round(min(all_e_combined), 2), round(max(all_e_combined), 2)] if all_e_combined else None,
                 "eff_precision_mean": round(sum(all_eff_prec) / len(all_eff_prec), 2) if all_eff_prec else None,
+                "mean_snr_at_budget": round(sum(all_snr) / len(all_snr), 2) if all_snr else None,
+                "min_snr_at_budget": round(min(all_snr), 2) if all_snr else None,
+                "mean_signal_power_db": round(sum(all_signal_power) / len(all_signal_power), 2) if all_signal_power else None,
                 "wall_time_sec": round(elapsed, 2),
             },
             "msd_calibration_data": calibration_data,
