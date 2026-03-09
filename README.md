@@ -709,7 +709,7 @@ is the signal-to-noise ratio at the converged budget for output channel $j$. Her
 
 | Stat | Calculation | Purpose |
 |------|-------------|---------|
-| `e_combined_mean` | $\frac{1}{C}\sum_j \bar{E}_j \text{ where } \bar{E}_j = \frac{1}{N}\sum_n E_{\text{combined}}[n,j]$ | Mean dynamic range across channels |
+| `e_combined_mean` | $\frac{1}{C}\sum_j \bar{E}_j \text{ where } \bar{E}_j = \frac{1}{N}\sum_n E_{\text{combined}}(n,j)$ | Mean dynamic range across channels |
 | `e_combined_std` | $\frac{1}{C}\sum_j \sigma_{E,j}$ (mean of per-channel standard deviations) | Temporal variability of dynamic range |
 | `e_combined_range` | $[\min_{j,n} E_{\text{combined}}, \max_{j,n} E_{\text{combined}}]$ | Global dynamic range envelope |
 
@@ -723,28 +723,28 @@ is the combined activation+weight scale exponent for sample $n$, output channel 
 
 | Stat | Calculation | Purpose |
 |------|-------------|---------|
-| `inter_delay_mean` | $\frac{1}{C}\sum_j \frac{1}{N \cdot n_b}\sum_{n,b} \text{inter\\_delay}[n,j,b]$ | Average alignment cost from block scale differences |
-| `intra_delay_mean` | $\frac{1}{N \cdot n_b \cdot b_s}\sum_{n,b,k} \text{intra\\_delay}[n,b,k]$ | Average element-level exponent spread (scalar, same for all channels) |
+| `inter_delay_mean` | $\frac{1}{C}\sum_j \frac{1}{N \cdot n_b}\sum_{n,b} \text{inter-delay}[n,j,b]$ | Average alignment cost from block scale differences |
+| `intra_delay_mean` | $\frac{1}{N \cdot n_b \cdot b_s}\sum_{n,b,k} \text{intra-delay}[n,b,k]$ | Average element-level exponent spread (scalar, same for all channels) |
 
 Where:
-- $\text{inter\_delay}[n,j,b]$: the inter-block alignment delay, where each block's combined scale may differ and the MSD pipeline must align all blocks to the dominant block, costing delay cycles for smaller blocks:
+- $\text{inter-delay}[n,j,b]$: the inter-block alignment delay, where each block's combined scale may differ and the MSD pipeline must align all blocks to the dominant block, costing delay cycles for smaller blocks:
 
-  $$\text{inter\_delay}[n,j,b] = E_{\max}[n,j] - \left\lfloor \log_2(x_{\text{scale}}[n,b] \cdot w_{\text{scale}}[j,b]) \right\rfloor$$
+  $$\text{inter-delay}[n,j,b] = E_{\max}[n,j] - \left\lfloor \log_2(x_{\text{scale}}[n,b] \cdot w_{\text{scale}}[j,b]) \right\rfloor$$
 
-- $\text{intra\_delay}[n,b,k]$: the intra-block delay from element-level activation exponent differences within each block; elements with smaller magnitudes start producing significant digits later:
+- $\text{intra-delay}[n,b,k]$: the intra-block delay from element-level activation exponent differences within each block; elements with smaller magnitudes start producing significant digits later:
 
-  $$\text{intra\_delay}[n,b,k] = e_{\max}[n,b] - \left\lfloor \log_2(|x_q[n,b,k]|) \right\rfloor$$
+  $$\text{intra-delay}[n,b,k] = e_{\max}[n,b] - \left\lfloor \log_2(|x_q[n,b,k]|) \right\rfloor$$
 
 **Effective precision:**
 
 | Stat | Calculation | Purpose |
 |------|-------------|---------|
-| `eff_precision_mean` | $\frac{1}{C}\sum_j \frac{1}{N \cdot n_b \cdot b_s}\sum_{n,b,k} p_{\text{eff}}[n,j,b,k]$ | Average useful precision after delay overhead |
-| `eff_precision_min` | $\min_j \min_{n,b,k} p_{\text{eff}}[n,j,b,k]$ | Worst-case precision across all elements |
+| `eff_precision_mean` | $\frac{1}{C}\sum_j \frac{1}{N \cdot n_b \cdot b_s}\sum_{n,b,k} p_{\text{eff}}(n,j,b,k)$ | Average useful precision after delay overhead |
+| `eff_precision_min` | $\min_j \min_{n,b,k} p_{\text{eff}}(n,j,b,k)$ | Worst-case precision across all elements |
 
 Where
 
-$$p_{\text{eff}}[n,j,b,k] = \max\!\left(0,\; B_j - \text{inter\_delay}[n,j,b] - \text{intra\_delay}[n,b,k] - \delta\right)$$
+$$p_{\text{eff}}[n,j,b,k] = \max\!\left(0,\; B_j - \text{inter-delay}[n,j,b] - \text{intra-delay}[n,b,k] - \delta\right)$$
 
 is the effective precision — the number of BSD digits actually computed for element $(n,j,b,k)$. Here $\delta$ is the MSD online delay (default 2). The effective precision represents the *useful computation cycles* remaining after accounting for all three sources of delay. A low `eff_precision_mean` relative to `budget_mean` indicates that delays consume most of the budget.
 
