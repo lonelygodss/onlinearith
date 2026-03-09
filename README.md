@@ -579,6 +579,7 @@ Uses `init_distributed_lite()` — no NCCL, ranks work independently.
 | `--max-length` | 512 | Max token length per calibration sample |
 | `--batch-size` | 4 | Batch size for calibration forward passes |
 | `--online-delay` | 2 | MSD online delay δ (should match inference config) |
+| `--detail-layer` | 2 | Transformer layer index for full per-channel statistics. The 3 MLP projections (gate/up/down) of this layer get channel-wise detail; all others get compact summaries only. |
 
 ### Expected Runtime
 
@@ -606,67 +607,180 @@ python ppltest.py --nproc 8 --setup 6 --calibration calibration_MXFP8.json
 
 ### Interpreting Results
 
-Each `calibration_{tag}.json` contains:
+Each `calibration_{tag}.json` has four main sections:
+
+1. **`global_summary`** — aggregate statistics across all layers
+2. **`layer_stats`** — compact per-layer summary (scalars only, ~15 fields per layer)
+3. **`channel_detail`** — full per-channel arrays for one specific layer (the detail layer)
+4. **`msd_calibration_data`** — per-channel budgets for all layers (used by `ppltest.py --calibration`)
+
+#### Output JSON Structure
 
 ```json
 {
   "format": "MXFP8",
-  "summary": {
+  "calibration_params": {
+    "target_snr_db": 30.0,
+    "num_texts": 20,
+    "max_length": 512,
+    "batch_size": 4,
+    "online_delay": 2,
+    "detail_layer": 2
+  },
+  "global_summary": {
     "num_layers": 84,
-    "total_channels": ...,
-    "budget_min": 8,
+    "total_channels": 200704,
+    "budget_min": 4,
     "budget_max": 32,
     "budget_mean": 16.5,
-    "e_combined_mean": 3.2,
-    "e_combined_range": [-5.0, 12.0],
+    "mean_snr": 32.5,
+    "min_snr": 30.0,
+    "e_combined_mean": -18.1,
     "eff_precision_mean": 10.5,
+    "signal_power_db_mean": 0.6,
     "wall_time_sec": 120.0
   },
-  "msd_calibration_data": {
-    "model.layers.0.mlp.gate_proj": [12, 14, 16, ...],
-    ...
-  },
-  "channel_stats": {
+  "layer_stats": {
     "model.layers.0.mlp.gate_proj": {
-      "e_combined_mean": [3.1, 2.8, 4.5, ...],
-      "e_combined_max":  [8.0, 7.0, 10.0, ...],
-      "e_combined_min":  [-2.0, -3.0, 0.0, ...],
-      "e_combined_std":  [1.2, 1.5, 0.8, ...],
-      "inter_delay_mean": [2.1, 1.8, 3.0, ...],
-      "intra_delay_mean": 2.3,
-      "eff_precision_mean": [10.5, 11.0, 9.2, ...],
-      "eff_precision_min":  [4.0, 5.0, 3.0, ...],
-      "snr_at_budget":     [30.5, 31.2, 30.0, ...],
-      "signal_power_db":   [-12.3, -8.1, -15.0, ...]
+      "budget_mean": 7.2, "budget_min": 4, "budget_max": 12,
+      "budget_std": 1.5, "budget_p25": 6, "budget_p50": 7, "budget_p75": 8,
+      "budget_histogram": {"4": 10, "5": 50, "6": 300, "7": 800, "8": 400},
+      "frac_at_min_budget": 0.004, "frac_at_max_budget": 0.0,
+      "snr_mean": 32.5, "snr_min": 30.0,
+      "e_combined_mean": -18.1, "e_combined_std": 1.2,
+      "e_combined_range": [-22.0, -12.0],
+      "inter_delay_mean": 2.1, "intra_delay_mean": 2.03,
+      "eff_precision_mean": 0.9, "eff_precision_min": 0.0,
+      "signal_power_db_mean": 0.6, "signal_power_db_range": [-10.0, 5.0]
+    }
+  },
+  "channel_detail": {
+    "detail_layer": 2,
+    "model.layers.2.mlp.gate_proj": {
+      "budget": [7, 8, 6, ...],
+      "snr_at_budget": [31.2, 30.5, 32.0, ...],
+      "e_combined_mean": [-17.8, -19.2, ...],
+      "e_combined_std": [1.1, 1.3, ...],
+      "inter_delay_mean": [2.0, 2.3, ...],
+      "eff_precision_mean": [1.2, 0.8, ...],
+      "signal_power_db": [-12.3, -8.1, ...]
     },
-    ...
+    "model.layers.2.mlp.up_proj": { "..." : "..." },
+    "model.layers.2.mlp.down_proj": { "..." : "..." }
+  },
+  "msd_calibration_data": {
+    "model.layers.0.mlp.gate_proj": [7, 8, 6, ...],
+    "...": "...(all 84 layers)"
   }
 }
 ```
 
-**`channel_stats`** provides per-channel dynamic range statistics vital for hardware design.
-Statistics are partitioned into **budget-independent** (intrinsic to data) and **budget-dependent** (characterize the converged budget) groups:
+#### Layer-wise Summary Statistics (`layer_stats`)
 
-**Budget-independent** (data-intrinsic, useful regardless of budget):
+Each layer gets a compact dict of scalar statistics. These are sufficient to understand
+cross-layer trends without storing per-channel arrays.
+
+**Budget distribution:**
+
+| Stat | Calculation | Purpose |
+|------|-------------|---------|
+| `budget_mean` | $\frac{1}{C}\sum_j B_j$ where $C$ = number of output channels | Average budget assigned to this layer |
+| `budget_min` / `budget_max` | $\min_j B_j$ / $\max_j B_j$ | Budget extremes |
+| `budget_std` | $\sqrt{\frac{1}{C}\sum_j (B_j - \bar{B})^2}$ | Budget spread — large std means diverse channel requirements |
+| `budget_p25` / `budget_p50` / `budget_p75` | 25th, 50th, 75th percentile of $\{B_j\}$ | Distribution shape (skew detection) |
+| `budget_histogram` | Count of channels at each discrete budget value, as `{"B": count}` | Full distribution in compact form |
+| `frac_at_min_budget` | Fraction of channels where $B_j = 4$ (search lower bound) | Detects saturation at minimum — these channels may not need as much budget as they got |
+| `frac_at_max_budget` | Fraction of channels where $B_j = 48$ (search upper bound) | Detects saturation at maximum — these channels may need *more* budget than the search range allows |
+
+**SNR validation:**
+
+| Stat | Calculation | Purpose |
+|------|-------------|---------|
+| `snr_mean` | $\frac{1}{C}\sum_j \text{SNR}_j$ | Average calibration quality |
+| `snr_min` | $\min_j \text{SNR}_j$ | Worst-case channel — should be $\geq$ `target_snr_db` |
+
+Where $\text{SNR}_j = 10 \cdot \log_{10}\!\left(\frac{\mathbb{E}_n[\text{exact}_j^2]}{\mathbb{E}_n[(\text{exact}_j - \text{truncated}_j)^2]}\right)$ is the signal-to-noise ratio at the converged budget for output channel $j$. Here $\text{exact}_j$ is the full-precision block-scaled dot-product result and $\text{truncated}_j$ is the result after MSD truncation at budget $B_j$. The expectation $\mathbb{E}_n$ averages over all $N_{\text{cal}}$ calibration token positions.
+
+**Combined exponent:**
+
+| Stat | Calculation | Purpose |
+|------|-------------|---------|
+| `e_combined_mean` | $\frac{1}{C}\sum_j \bar{E}_j$ where $\bar{E}_j = \frac{1}{N}\sum_n E_{\text{combined}}[n,j]$ | Mean dynamic range across channels |
+| `e_combined_std` | $\frac{1}{C}\sum_j \sigma_{E,j}$ (mean of per-channel standard deviations) | Temporal variability of dynamic range |
+| `e_combined_range` | $[\min_{j,n} E_{\text{combined}}, \max_{j,n} E_{\text{combined}}]$ | Global dynamic range envelope |
+
+Where $E_{\text{combined}}[n,j] = \max_b \lfloor \log_2(x\_scale[n,b]) + \log_2(w\_scale[j,b]) \rfloor$ is the combined activation+weight scale exponent for sample $n$, output channel $j$. The max is taken over blocks $b$, giving the dominant block's magnitude. This is the primary driver of budget assignment — channels with higher $E_{\text{combined}}$ produce larger intermediate results and need more precision digits to maintain accuracy.
+
+**Delays:**
+
+| Stat | Calculation | Purpose |
+|------|-------------|---------|
+| `inter_delay_mean` | $\frac{1}{C}\sum_j \frac{1}{N \cdot n_b}\sum_{n,b} \text{inter\_delay}[n,j,b]$ | Average alignment cost from block scale differences |
+| `intra_delay_mean` | $\frac{1}{N \cdot n_b \cdot b_s}\sum_{n,b,k} \text{intra\_delay}[n,b,k]$ | Average element-level exponent spread (scalar, same for all channels) |
+
+Where:
+- $\text{inter\_delay}[n,j,b] = E_{\max}[n,j] - \lfloor \log_2(x\_scale[n,b] \cdot w\_scale[j,b]) \rfloor$ is the inter-block alignment delay. Each block's combined scale may differ; the MSD pipeline must align all blocks to the dominant block, costing delay cycles for smaller blocks.
+- $\text{intra\_delay}[n,b,k] = e_{\max}[n,b] - \lfloor \log_2(|x_q[n,b,k]|) \rfloor$ is the intra-block delay from element-level activation exponent differences within each block. Elements with smaller magnitudes within a block start producing significant digits later.
+
+**Effective precision:**
+
+| Stat | Calculation | Purpose |
+|------|-------------|---------|
+| `eff_precision_mean` | $\frac{1}{C}\sum_j \frac{1}{N \cdot n_b \cdot b_s}\sum_{n,b,k} p_{\text{eff}}[n,j,b,k]$ | Average useful precision after delay overhead |
+| `eff_precision_min` | $\min_j \min_{n,b,k} p_{\text{eff}}[n,j,b,k]$ | Worst-case precision across all elements |
+
+Where $p_{\text{eff}}[n,j,b,k] = \max(0,\; B_j - \text{inter\_delay}[n,j,b] - \text{intra\_delay}[n,b,k] - \delta)$ is the effective precision — the number of BSD digits actually computed for element $(n,j,b,k)$. Here $\delta$ is the MSD online delay (default 2). The effective precision represents the *useful computation cycles* remaining after accounting for all three sources of delay. A low `eff_precision_mean` relative to `budget_mean` indicates that delays consume most of the budget.
+
+**Signal power:**
+
+| Stat | Calculation | Purpose |
+|------|-------------|---------|
+| `signal_power_db_mean` | $\frac{1}{C}\sum_j 10\cdot\log_{10}(\mathbb{E}_n[\text{exact}_j^2])$ | Mean signal magnitude scale |
+| `signal_power_db_range` | $[\min_j, \max_j]$ of per-channel signal power in dB | Signal magnitude spread |
+
+This shows the intrinsic magnitude of the exact dot-product results. Channels with high signal power have large outputs and typically correlate with higher budgets since the absolute truncation error must be proportionally small to maintain the SNR target.
+
+#### Channel-wise Detail Statistics (`channel_detail`)
+
+Full per-channel arrays are collected only for the 3 MLP projections (gate/up/down) of the
+`--detail-layer` (default: layer 2). This provides detailed diagnostic data without bloating
+the JSON (the previous format stored per-channel arrays for all 84 layers, producing ~2M-line files).
 
 | Stat | Shape | Description |
 |------|-------|-------------|
-| `e_combined_mean` | per-channel | Average combined log2 scale across calibration samples |
-| `e_combined_max/min` | per-channel | Peak/minimum combined scale — shows dynamic range |
-| `e_combined_std` | per-channel | Standard deviation — shows variability |
-| `inter_delay_mean` | per-channel | Average inter-block delay (block scale differences) |
-| `intra_delay_mean` | scalar | Average intra-block delay (element-level exponent spread) |
-| `signal_power_db` | per-channel | 10·log10(mean(exact_dot²)) — intrinsic magnitude scale |
-| `snr_at_budget` | per-channel | Actual SNR (dB) achieved at the converged budget — validates that target_snr_db is met |
+| `budget` | `(out,)` | Calibrated $B_j$ per channel (same as `msd_calibration_data` for this layer) |
+| `snr_at_budget` | `(out,)` | Actual SNR (dB) at converged budget — primary validation metric |
+| `e_combined_mean` | `(out,)` | Per-channel mean $E_{\text{combined}}$ — main budget driver |
+| `e_combined_std` | `(out,)` | Per-channel temporal variability of $E_{\text{combined}}$ |
+| `inter_delay_mean` | `(out,)` | Per-channel mean inter-block alignment delay |
+| `eff_precision_mean` | `(out,)` | Per-channel mean effective precision |
+| `signal_power_db` | `(out,)` | Per-channel signal power in dB |
 
-**Budget-dependent** (characterize the converged B_base):
+These arrays enable scatter-plot visualization of channel-level correlations using
+`calibration_viz.py` (see below).
 
-| Stat | Shape | Description |
-|------|-------|-------------|
-| `eff_precision_mean` | per-channel | Average effective precision = B − total_delay |
-| `eff_precision_min` | per-channel | Worst-case effective precision (minimum across elements and samples) |
+### Visualizing Calibration Results
 
-Channels with large `e_combined` have high result magnitudes and get higher budgets; channels with high `inter_delay_mean` lose more cycles to alignment. The `snr_at_budget` is the primary validation metric — it should be ≥ `target_snr_db` for every channel. The `signal_power_db` shows the intrinsic magnitude scale and correlates with the budget assigned.
+Use `calibration_viz.py` to produce diagnostic charts from any calibration JSON:
+
+```bash
+python calibration_viz.py calibration_MXFP8.json
+python calibration_viz.py calibration_MXFP8.json --output-dir calib_charts/
+python calibration_viz.py calibration_MXFP8.json --no-show
+```
+
+Charts produced (saved as PNGs):
+
+| Chart | Scope | What it shows |
+|-------|-------|---------------|
+| Layer budget overview | All layers | Mean budget per layer with min-max range bars |
+| Layer SNR overview | All layers | Mean and min SNR per layer with target line |
+| Budget histogram | Detail layer | Distribution of discrete budget values per projection |
+| Budget vs e_combined | Detail layer | How combined exponent drives budget assignment |
+| Budget vs signal power | Detail layer | How signal magnitude relates to budget |
+| SNR distribution | Detail layer | Per-channel SNR histogram with target line |
+| Eff. precision vs budget | Detail layer | How much budget translates to useful precision |
+| Inter-delay vs e_combined | Detail layer | Alignment cost vs dynamic range |
 
 ### To Remove Calibration
 
@@ -899,5 +1013,6 @@ When `msd_deep_pipeline=true`, precision is tracked through the MLP stages:
 | `benchmarktest.py` | lm-eval harness (MMLU, GSM8K) |
 | `visualization.py` | Chart generation from benchmark JSON results |
 | `calibrate.py` | Offline MSD budget calibration, multi-GPU via `--nproc` |
+| `calibration_viz.py` | Calibration quality visualization (diagnostic charts from JSON) |
 | `ppl_results_*.json` | Saved PPL evaluation results (one per setup) |
 | `ppl_batch_summary.json` | Consolidated batch summary with all metrics |

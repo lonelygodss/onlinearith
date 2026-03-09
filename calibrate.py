@@ -105,6 +105,11 @@ def main():
                         help="Batch size for calibration forward passes (default: 4)")
     parser.add_argument("--online-delay", type=int, default=2,
                         help="MSD online delay δ (default: 2)")
+    parser.add_argument("--detail-layer", type=int, default=2, metavar="L",
+                        help="Transformer layer index for full per-channel "
+                             "statistics (default: 2). The 3 MLP projections "
+                             "(gate/up/down) of this layer get channel-wise "
+                             "detail; all other layers only get compact summaries.")
     args = parser.parse_args()
     restrict_gpus(args.gpus)
     maybe_relaunch_with_torchrun(args.nproc)
@@ -157,6 +162,7 @@ def main():
         print(f"World size: {world_size}  |  Device: {device}  |  dtype: {dtype}")
         print(f"Total setups: {len(run_setups)}  |  Setups on this rank: {len(my_setups)}")
         print(f"Target SNR: {args.target_snr}dB  |  Calibration texts: {args.num_texts}")
+        print(f"Detail layer: {args.detail_layer}")
         print()
 
     if not my_setups:
@@ -227,7 +233,7 @@ def main():
 
         # Run calibration (GPU-accelerated, output-chunked)
         t0 = time.perf_counter()
-        calibration_data, channel_stats = calibrate_channel_budgets(
+        calibration_data, layer_summaries, channel_details = calibrate_channel_budgets(
             model, tokenizer, cal_texts,
             target_snr_db=args.target_snr,
             max_length=args.max_length,
@@ -235,6 +241,7 @@ def main():
             online_delay=args.online_delay,
             show_progress=is_main(rank),
             progress_prefix=f"[rank {rank}] ",
+            detail_layer=args.detail_layer,
         )
         elapsed = time.perf_counter() - t0
 
@@ -242,25 +249,19 @@ def main():
             print(f"[rank {rank}]   WARNING: No MXFP layers found. Skipping.\n")
             continue
 
-        # Compute summary statistics
+        # Compute global summary from per-layer summaries
         all_budgets = []
         for layer_budgets in calibration_data.values():
             all_budgets.extend(layer_budgets)
 
-        # Aggregate channel stats across all layers for the summary
-        all_e_combined = []
-        all_eff_prec = []
-        all_snr = []
-        all_signal_power = []
-        for layer_st in channel_stats.values():
-            if isinstance(layer_st.get("e_combined_mean"), list):
-                all_e_combined.extend(layer_st["e_combined_mean"])
-            if isinstance(layer_st.get("eff_precision_mean"), list):
-                all_eff_prec.extend(layer_st["eff_precision_mean"])
-            if isinstance(layer_st.get("snr_at_budget"), list):
-                all_snr.extend(layer_st["snr_at_budget"])
-            if isinstance(layer_st.get("signal_power_db"), list):
-                all_signal_power.extend(layer_st["signal_power_db"])
+        all_snr_means = [s["snr_mean"] for s in layer_summaries.values()
+                         if s.get("snr_mean") is not None]
+        all_snr_mins = [s["snr_min"] for s in layer_summaries.values()
+                        if s.get("snr_min") is not None]
+        all_e_combined = [s["e_combined_mean"] for s in layer_summaries.values()]
+        all_eff_prec = [s["eff_precision_mean"] for s in layer_summaries.values()]
+        all_sig_power = [s["signal_power_db_mean"] for s in layer_summaries.values()
+                         if s.get("signal_power_db_mean") is not None]
 
         result = {
             "format": tag,
@@ -272,23 +273,27 @@ def main():
                 "max_length": args.max_length,
                 "batch_size": args.batch_size,
                 "online_delay": args.online_delay,
+                "detail_layer": args.detail_layer,
             },
-            "summary": {
+            "global_summary": {
                 "num_layers": len(calibration_data),
                 "total_channels": len(all_budgets),
                 "budget_min": min(all_budgets),
                 "budget_max": max(all_budgets),
                 "budget_mean": round(sum(all_budgets) / len(all_budgets), 2),
+                "mean_snr": round(sum(all_snr_means) / len(all_snr_means), 2) if all_snr_means else None,
+                "min_snr": round(min(all_snr_mins), 2) if all_snr_mins else None,
                 "e_combined_mean": round(sum(all_e_combined) / len(all_e_combined), 2) if all_e_combined else None,
-                "e_combined_range": [round(min(all_e_combined), 2), round(max(all_e_combined), 2)] if all_e_combined else None,
                 "eff_precision_mean": round(sum(all_eff_prec) / len(all_eff_prec), 2) if all_eff_prec else None,
-                "mean_snr_at_budget": round(sum(all_snr) / len(all_snr), 2) if all_snr else None,
-                "min_snr_at_budget": round(min(all_snr), 2) if all_snr else None,
-                "mean_signal_power_db": round(sum(all_signal_power) / len(all_signal_power), 2) if all_signal_power else None,
+                "signal_power_db_mean": round(sum(all_sig_power) / len(all_sig_power), 2) if all_sig_power else None,
                 "wall_time_sec": round(elapsed, 2),
             },
+            "layer_stats": layer_summaries,
+            "channel_detail": {
+                "detail_layer": args.detail_layer,
+                **channel_details,
+            },
             "msd_calibration_data": calibration_data,
-            "channel_stats": channel_stats,
         }
 
         with open(result_file, "w") as f:
@@ -318,7 +323,7 @@ def main():
             if result_file.exists():
                 with open(result_file) as f:
                     res = json.load(f)
-                s = res.get("summary", {})
+                s = res.get("global_summary", res.get("summary", {}))
                 bmin = s.get("budget_min", "?")
                 bmax = s.get("budget_max", "?")
                 bmean = s.get("budget_mean", "?")
