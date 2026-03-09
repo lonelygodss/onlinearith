@@ -275,6 +275,7 @@ The `_resolve_channel_budgets()` method in `_MXFPLinearBase` implements this com
 | `msd_deep_pipeline` | bool | false | Enable MSD streaming through MLP (gate→silu→×up→down) |
 | `msd_pipeline_precision_loss` | int | 2 | Digits of precision lost per pipeline stage |
 | `msd_calibration_data` | dict/null | null | Per-layer per-channel calibrated B_base (Tier B) |
+| `msd_chunk_target_mib` | int | 512 | Target MiB for largest MSD intermediate tensor per output chunk. Actual peak is ~3x this (multiple coexisting temporaries). Reduce for smaller GPUs; increase for throughput on larger GPUs. |
 
 ---
 
@@ -1108,9 +1109,11 @@ gating. This is the fine-grained complement to the coarse block-level zero_block
 
 | Stat | Calculation | Purpose |
 |------|-------------|--------|
-| `budget_mean` | total_budget_sum / total_blocks — average budget per dot-product | Cycle allocation efficiency |
+| `budget_mean` | total_budget_sum / total_blocks -- average budget per dot-product | Cycle allocation efficiency |
 | `effective_cycles_total` | Sum of all p_eff values across all elements | Total "work done" for this layer |
 | `utilization_mean` | Mean across channels of (effective_cycles / total_budget) | How much of the allocated budget was used |
+| `max_budget` | Max of b_final[n,j] across all samples and channels | Worst-case cycles allocated (layer latency indicator) |
+| `max_total_delay` | Max of (inter_delay + intra_delay + online_delay) across all (n,j,b,k) | Worst-case start delay before computation begins |
 
 Utilization reflects the combined effect of all delay sources and early termination.
 A utilization of 0.6 means 40% of allocated cycles were wasted on delays or early
@@ -1141,12 +1144,37 @@ per-output-channel arrays instead of scalar aggregates:
 |---------|--------|-------|
 | `bit_level` | p_eff_mean, p_eff_std, active_p_eff_mean, p_eff_histogram | (out,) or (out, 8) |
 | `block_level` | zero/partial/full_block_count, ratios, partial_block_active_frac | (out,) |
-| `channel_level` | total_budget_cycles, effective_cycles, skipped_cycles, utilization | (out,) |
+| `channel_level` | total_budget_cycles, effective_cycles, skipped_cycles, utilization, max_budget, max_total_delay | (out,) |
 | `mac_level` | total_elements, zero_elements, mac_sparsity | (out,) |
 
 These arrays enable scatter-plot visualization of channel-level correlations (e.g.,
-MAC sparsity vs utilization, p_eff_mean vs budget). A future `perf_viz.py` could
-produce diagnostic charts similar to `calibration_viz.py`.
+MAC sparsity vs utilization, p_eff_mean vs budget).
+
+### Visualizing Performance Statistics
+
+Use `perf_viz.py` to produce diagnostic charts from any PPL result JSON that contains
+`msd_perf_stats`:
+
+```bash
+python perf_viz.py ppl_results_MXFP8_MSD_B16.json
+python perf_viz.py ppl_results_MXFP8_MSD_B16_calib.json --output-dir perf_charts/
+python perf_viz.py ppl_results_MXFP8_MSD_B16.json --no-show
+```
+
+Charts produced (saved as PNGs):
+
+| Chart | Scope | What it shows |
+|-------|-------|---------------|
+| Layer p_eff overview | All layers | Mean and active effective precision per layer |
+| Layer utilization | All layers | Budget utilization percentage per layer |
+| Layer MAC sparsity | All layers | Fraction of skipped MACs per layer |
+| Layer block breakdown | All layers | Stacked zero/partial/full block ratios |
+| Layer max latency | All layers | Max budget and max total delay per layer (latency indicators) |
+| Channel p_eff histogram | Detail layer | Distribution of per-channel effective precision |
+| Channel utilization histogram | Detail layer | Distribution of per-channel utilization |
+| Channel MAC sparsity histogram | Detail layer | Distribution of per-channel MAC sparsity |
+| Channel p_eff vs utilization | Detail layer | Correlation between precision and utilization |
+| Channel max delay histogram | Detail layer | Distribution of per-channel max delay and max budget |
 
 ### Design Intent
 
@@ -1272,7 +1300,7 @@ When `msd_deep_pipeline=true`, precision is tracked through the MLP stages:
 
 3. **Not thread-safe (but process-safe):** The `MSDComputeContext` uses a class-level singleton pattern (`_active`). This would break under concurrent forward passes within a single process (e.g., `nn.DataParallel`). However, it is safe under `torchrun` / DDP because each rank is a separate process with its own class variable.
 
-4. **Memory for large models:** The MSD path creates a `(N, out, nb, bs)` tensor for per-element truncation. This is now **output-chunked** to stay within a 2 GiB budget, which solved the original 48 GB OOM on Qwen3-0.6B. Larger models should also work within the chunk limits.
+4. **Memory for large models:** The MSD path creates a `(N, out, nb, bs)` tensor for per-element truncation. This is now **output-chunked** with a configurable target (`msd_chunk_target_mib`, default 512 MiB). The actual peak memory per chunk is roughly 3x this value due to multiple coexisting intermediates. Reduce `msd_chunk_target_mib` in config.json if encountering OOM on smaller GPUs.
 
 5. **MLP-only scope:** The simulation covers the `gate_proj → SiLU → ×up_proj → down_proj` pattern. Other operations (LayerNorm, residual adds, softmax) use standard precision.
 
@@ -1296,5 +1324,6 @@ When `msd_deep_pipeline=true`, precision is tracked through the MLP stages:
 | `visualization.py` | Chart generation from benchmark JSON results |
 | `calibrate.py` | Offline MSD budget calibration, multi-GPU via `--nproc` |
 | `calibration_viz.py` | Calibration quality visualization (diagnostic charts from JSON) |
+| `perf_viz.py` | MSD inference performance statistics visualization (charts from PPL result JSON) |
 | `ppl_results_*.json` | Saved PPL evaluation results (one per setup) |
 | `ppl_batch_summary.json` | Consolidated batch summary with all metrics |

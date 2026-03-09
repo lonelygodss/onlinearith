@@ -283,7 +283,7 @@ calibration workflow:
     t_start = time.perf_counter()
 
     iterator = tqdm(my_windows, desc=f"[rank {rank}] PPL windows", disable=not is_main(rank))
-    for begin_loc, end_loc, trg_len in iterator:
+    for win_idx, (begin_loc, end_loc, trg_len) in enumerate(iterator):
         input_ids  = encodings.input_ids[:, begin_loc:end_loc].to(device)
         target_ids = input_ids.clone()
         target_ids[:, :-trg_len] = -100
@@ -295,6 +295,11 @@ calibration workflow:
         local_nll_sum  += avg_nll * trg_len
         local_tokens   += trg_len
         local_chunk_nlls.append(avg_nll)
+
+        # Free tensors and periodically release cached memory to prevent OOM
+        del input_ids, target_ids, outputs
+        if win_idx % 20 == 19:
+            torch.cuda.empty_cache()
 
     elapsed = time.perf_counter() - t_start
 
@@ -395,15 +400,17 @@ calibration workflow:
             print(f"  Zero blocks      : {g.get('zero_block_ratio', 0):.4%}")
             print(f"  Partial blocks   : {g.get('partial_block_ratio', 0):.4%}")
             print(f"  Full blocks      : {g.get('full_block_ratio', 0):.4%}")
+            print(f"  Max budget (lat) : {g.get('max_budget', 0):.1f} cycles")
+            print(f"  Max total delay  : {g.get('max_total_delay', 0):.1f} cycles")
             print(SEP)
 
             # ── Per-layer summary table ──
             pl = msd_perf.get("per_layer", {})
             if pl:
-                HDR = f"  {'Layer':<40s}  p_eff  util%  mac_sp%  zero_blk%"
+                HDR = f"  {'Layer':<40s}  p_eff  util%  mac_sp%  zero_blk%  max_B"
                 print(f"\n  Per-layer summary (detail_layer={args.detail_layer}):")
                 print(HDR)
-                print(f"  {'-'*73}")
+                print(f"  {'-'*80}")
                 for lname, ldata in pl.items():
                     s = ldata.get("summary", {})
                     bl = s.get("bit_level", {})
@@ -416,8 +423,9 @@ calibration workflow:
                     util_v = cl.get("utilization_mean", 0) * 100
                     mac_sp_v = ml.get("mac_sparsity", 0) * 100
                     zblk_v = bkl.get("zero_block_ratio", 0) * 100
+                    max_b_v = cl.get("max_budget", 0)
                     detail_tag = " *" if "channel_detail" in ldata else ""
-                    print(f"  {short:<40s}  {p_eff_v:5.1f}  {util_v:5.1f}  {mac_sp_v:6.2f}   {zblk_v:6.2f}{detail_tag}")
+                    print(f"  {short:<40s}  {p_eff_v:5.1f}  {util_v:5.1f}  {mac_sp_v:6.2f}   {zblk_v:6.2f}  {max_b_v:5.1f}{detail_tag}")
                 print(f"  (* = channel detail in JSON for --detail-layer={args.detail_layer})")
             print(SEP)
 

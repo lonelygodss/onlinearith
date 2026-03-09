@@ -42,6 +42,7 @@ MXFP_MSD_FIELDS: list[str] = [
     "msd_deep_pipeline",
     "msd_pipeline_precision_loss",
     "msd_calibration_data",
+    "msd_chunk_target_mib",
 ]
 
 # ── Baseline config: everything off, all fields at their Qwen3Config defaults
@@ -63,6 +64,7 @@ BASELINE_CONFIG: dict = {
     "msd_deep_pipeline": False,
     "msd_pipeline_precision_loss": 2,
     "msd_calibration_data": None,
+    "msd_chunk_target_mib": 512,
 }
 
 
