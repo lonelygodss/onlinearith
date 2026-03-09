@@ -684,76 +684,76 @@ cross-layer trends without storing per-channel arrays.
 
 | Stat | Calculation | Purpose |
 |------|-------------|---------|
-| `budget_mean` | $\frac{1}{C}\sum_j B_j$ where $C$ = number of output channels | Average budget assigned to this layer |
-| `budget_min` / `budget_max` | $\min_j B_j$ / $\max_j B_j$ | Budget extremes |
-| `budget_std` | $\sqrt{\frac{1}{C}\sum_j (B_j - \bar{B})^2}$ | Budget spread — large std means diverse channel requirements |
-| `budget_p25` / `budget_p50` / `budget_p75` | 25th, 50th, 75th percentile of $\{B_j\}$ | Distribution shape (skew detection) |
+| `budget_mean` | `mean(B[j])` over all output channels | Average budget assigned to this layer |
+| `budget_min` / `budget_max` | `min(B[j])` / `max(B[j])` | Budget extremes |
+| `budget_std` | `std(B[j])` | Budget spread — large std means diverse channel requirements |
+| `budget_p25` / `budget_p50` / `budget_p75` | 25th, 50th, 75th percentile of `{B[j]}` | Distribution shape (skew detection) |
 | `budget_histogram` | Count of channels at each discrete budget value, as `{"B": count}` | Full distribution in compact form |
-| `frac_at_min_budget` | Fraction of channels where $B_j = 4$ (search lower bound) | Detects saturation at minimum — these channels may not need as much budget as they got |
-| `frac_at_max_budget` | Fraction of channels where $B_j = 48$ (search upper bound) | Detects saturation at maximum — these channels may need *more* budget than the search range allows |
+| `frac_at_min_budget` | Fraction of channels where `B[j] = 4` (search lower bound) | Detects saturation at minimum — these channels may not need as much budget as they got |
+| `frac_at_max_budget` | Fraction of channels where `B[j] = 48` (search upper bound) | Detects saturation at maximum — these channels may need *more* budget than the search range allows |
 
 **SNR validation:**
 
 | Stat | Calculation | Purpose |
 |------|-------------|---------|
-| `snr_mean` | $\frac{1}{C}\sum_j \text{SNR}_j$ | Average calibration quality |
-| `snr_min` | $\min_j \text{SNR}_j$ | Worst-case channel — should be $\geq$ `target_snr_db` |
+| `snr_mean` | `mean(SNR[j])` over all output channels | Average calibration quality |
+| `snr_min` | `min(SNR[j])` | Worst-case channel — should be >= `target_snr_db` |
 
-Where
+Where:
 
-$$\text{SNR}_j = 10 \cdot \log_{10}\!\left(\frac{\mathbb{E}_n[\text{exact}_j^2]}{\mathbb{E}_n[(\text{exact}_j - \text{truncated}_j)^2]}\right)$$
+> SNR[j] = 10 · log10( mean_n(exact[j]²) / mean_n((exact[j] − truncated[j])²) )
 
-is the signal-to-noise ratio at the converged budget for output channel $j$. Here $\text{exact}_j$ is the full-precision block-scaled dot-product result and $\text{truncated}_j$ is the result after MSD truncation at budget $B_j$. The expectation $\mathbb{E}_n$ averages over all $N_{\text{cal}}$ calibration token positions.
+is the signal-to-noise ratio at the converged budget for output channel `j`. Here `exact[j]` is the full-precision block-scaled dot-product result and `truncated[j]` is the result after MSD truncation at budget `B[j]`. The expectation `mean_n` averages over all N_cal calibration token positions.
 
 **Combined exponent:**
 
 | Stat | Calculation | Purpose |
 |------|-------------|---------|
-| `e_combined_mean` | $\frac{1}{C}\sum_j \bar{E}_j \text{ where } \bar{E}_j = \frac{1}{N}\sum_n E_{\text{combined}}(n,j)$ | Mean dynamic range across channels |
-| `e_combined_std` | $\frac{1}{C}\sum_j \sigma_{E,j}$ (mean of per-channel standard deviations) | Temporal variability of dynamic range |
-| `e_combined_range` | $[\min_{j,n} E_{\text{combined}}, \max_{j,n} E_{\text{combined}}]$ | Global dynamic range envelope |
+| `e_combined_mean` | `mean_j( mean_n( E_combined[n,j] ) )` | Mean dynamic range across channels |
+| `e_combined_std` | Mean of per-channel standard deviations of `E_combined` | Temporal variability of dynamic range |
+| `e_combined_range` | `[min(E_combined), max(E_combined)]` over all (n, j) | Global dynamic range envelope |
 
-Where
+Where:
 
-$$E_{\text{combined}}[n,j] = \max_b \left\lfloor \log_2(x_{\text{scale}}[n,b]) + \log_2(w_{\text{scale}}[j,b]) \right\rfloor$$
+> E_combined[n,j] = max over blocks b of floor(log2(x_scale[n,b]) + log2(w_scale[j,b]))
 
-is the combined activation+weight scale exponent for sample $n$, output channel $j$. The max is taken over blocks $b$, giving the dominant block's magnitude. This is the primary driver of budget assignment — channels with higher $E_{\text{combined}}$ produce larger intermediate results and need more precision digits to maintain accuracy.
+is the combined activation+weight scale exponent for sample `n`, output channel `j`. The max is taken over blocks `b`, giving the dominant block's magnitude. This is the primary driver of budget assignment — channels with higher `E_combined` produce larger intermediate results and need more precision digits to maintain accuracy.
 
 **Delays:**
 
 | Stat | Calculation | Purpose |
 |------|-------------|---------|
-| `inter_delay_mean` | $\frac{1}{C}\sum_j \frac{1}{N \cdot n_b}\sum_{n,b} \text{inter-delay}[n,j,b]$ | Average alignment cost from block scale differences |
-| `intra_delay_mean` | $\frac{1}{N \cdot n_b \cdot b_s}\sum_{n,b,k} \text{intra-delay}[n,b,k]$ | Average element-level exponent spread (scalar, same for all channels) |
+| `inter_delay_mean` | `mean` over all (j, n, b) of `inter_delay[n,j,b]` | Average alignment cost from block scale differences |
+| `intra_delay_mean` | `mean` over all (n, b, k) of `intra_delay[n,b,k]` | Average element-level exponent spread (scalar, same for all channels) |
 
 Where:
-- $\text{inter-delay}[n,j,b]$: the inter-block alignment delay, where each block's combined scale may differ and the MSD pipeline must align all blocks to the dominant block, costing delay cycles for smaller blocks:
+- `inter_delay[n,j,b]`: the inter-block alignment delay, where each block's combined scale may differ and the MSD pipeline must align all blocks to the dominant block, costing delay cycles for smaller blocks:
 
-  $$\text{inter-delay}[n,j,b] = E_{\max}[n,j] - \left\lfloor \log_2(x_{\text{scale}}[n,b] \cdot w_{\text{scale}}[j,b]) \right\rfloor$$
+  > inter_delay[n,j,b] = E_max[n,j] − floor(log2(x_scale[n,b] · w_scale[j,b]))
 
-- $\text{intra-delay}[n,b,k]$: the intra-block delay from element-level activation exponent differences within each block; elements with smaller magnitudes start producing significant digits later:
+- `intra_delay[n,b,k]`: the intra-block delay from element-level activation exponent differences within each block; elements with smaller magnitudes start producing significant digits later:
 
-  $$\text{intra-delay}[n,b,k] = e_{\max}[n,b] - \left\lfloor \log_2(|x_q[n,b,k]|) \right\rfloor$$
+  > intra_delay[n,b,k] = e_max[n,b] − floor(log2(|x_q[n,b,k]|))
 
 **Effective precision:**
 
 | Stat | Calculation | Purpose |
 |------|-------------|---------|
-| `eff_precision_mean` | $\frac{1}{C}\sum_j \frac{1}{N \cdot n_b \cdot b_s}\sum_{n,b,k} p_{\text{eff}}(n,j,b,k)$ | Average useful precision after delay overhead |
-| `eff_precision_min` | $\min_j \min_{n,b,k} p_{\text{eff}}(n,j,b,k)$ | Worst-case precision across all elements |
+| `eff_precision_mean` | `mean` over all (j, n, b, k) of `p_eff[n,j,b,k]` | Average useful precision after delay overhead |
+| `eff_precision_min` | `min` over all (j, n, b, k) of `p_eff[n,j,b,k]` | Worst-case precision across all elements |
 
-Where
+Where:
 
-$$p_{\text{eff}}[n,j,b,k] = \max\!\left(0,\; B_j - \text{inter-delay}[n,j,b] - \text{intra-delay}[n,b,k] - \delta\right)$$
+> p_eff[n,j,b,k] = max(0, B[j] − inter_delay[n,j,b] − intra_delay[n,b,k] − δ)
 
-is the effective precision — the number of BSD digits actually computed for element $(n,j,b,k)$. Here $\delta$ is the MSD online delay (default 2). The effective precision represents the *useful computation cycles* remaining after accounting for all three sources of delay. A low `eff_precision_mean` relative to `budget_mean` indicates that delays consume most of the budget.
+is the effective precision — the number of BSD digits actually computed for element `(n,j,b,k)`. Here `δ` is the MSD online delay (default 2). The effective precision represents the *useful computation cycles* remaining after accounting for all three sources of delay. A low `eff_precision_mean` relative to `budget_mean` indicates that delays consume most of the budget.
 
 **Signal power:**
 
 | Stat | Calculation | Purpose |
 |------|-------------|---------|
-| `signal_power_db_mean` | $\frac{1}{C}\sum_j 10\cdot\log_{10}(\mathbb{E}_n[\text{exact}_j^2])$ | Mean signal magnitude scale |
-| `signal_power_db_range` | $[\min_j, \max_j]$ of per-channel signal power in dB | Signal magnitude spread |
+| `signal_power_db_mean` | `mean_j( 10 · log10( mean_n(exact[j]²) ) )` | Mean signal magnitude scale |
+| `signal_power_db_range` | `[min, max]` of per-channel signal power in dB | Signal magnitude spread |
 
 This shows the intrinsic magnitude of the exact dot-product results. Channels with high signal power have large outputs and typically correlate with higher budgets since the absolute truncation error must be proportionally small to maintain the SNR target.
 
@@ -765,10 +765,10 @@ the JSON (the previous format stored per-channel arrays for all 84 layers, produ
 
 | Stat | Shape | Description |
 |------|-------|-------------|
-| `budget` | `(out,)` | Calibrated $B_j$ per channel (same as `msd_calibration_data` for this layer) |
+| `budget` | `(out,)` | Calibrated `B[j]` per channel (same as `msd_calibration_data` for this layer) |
 | `snr_at_budget` | `(out,)` | Actual SNR (dB) at converged budget — primary validation metric |
-| `e_combined_mean` | `(out,)` | Per-channel mean $E_{\text{combined}}$ — main budget driver |
-| `e_combined_std` | `(out,)` | Per-channel temporal variability of $E_{\text{combined}}$ |
+| `e_combined_mean` | `(out,)` | Per-channel mean `E_combined` — main budget driver |
+| `e_combined_std` | `(out,)` | Per-channel temporal variability of `E_combined` |
 | `inter_delay_mean` | `(out,)` | Per-channel mean inter-block alignment delay |
 | `eff_precision_mean` | `(out,)` | Per-channel mean effective precision |
 | `signal_power_db` | `(out,)` | Per-channel signal power in dB |
