@@ -709,18 +709,18 @@ Where $\text{SNR}_j = 10 \cdot \log_{10}\!\left(\frac{\mathbb{E}_n[\text{exact}_
 | `e_combined_std` | $\frac{1}{C}\sum_j \sigma_{E,j}$ (mean of per-channel standard deviations) | Temporal variability of dynamic range |
 | `e_combined_range` | $[\min_{j,n} E_{\text{combined}}, \max_{j,n} E_{\text{combined}}]$ | Global dynamic range envelope |
 
-Where $E_{\text{combined}}[n,j] = \max_b \lfloor \log_2(x\_scale[n,b]) + \log_2(w\_scale[j,b]) \rfloor$ is the combined activation+weight scale exponent for sample $n$, output channel $j$. The max is taken over blocks $b$, giving the dominant block's magnitude. This is the primary driver of budget assignment — channels with higher $E_{\text{combined}}$ produce larger intermediate results and need more precision digits to maintain accuracy.
+Where $E_{\text{combined}}[n,j] = \max_b \lfloor \log_2(x\\_\text{scale}[n,b]) + \log_2(w\\_\text{scale}[j,b]) \rfloor$ is the combined activation+weight scale exponent for sample $n$, output channel $j$. The max is taken over blocks $b$, giving the dominant block's magnitude. This is the primary driver of budget assignment — channels with higher $E_{\text{combined}}$ produce larger intermediate results and need more precision digits to maintain accuracy.
 
 **Delays:**
 
 | Stat | Calculation | Purpose |
 |------|-------------|---------|
-| `inter_delay_mean` | $\frac{1}{C}\sum_j \frac{1}{N \cdot n_b}\sum_{n,b} \text{inter\_delay}[n,j,b]$ | Average alignment cost from block scale differences |
-| `intra_delay_mean` | $\frac{1}{N \cdot n_b \cdot b_s}\sum_{n,b,k} \text{intra\_delay}[n,b,k]$ | Average element-level exponent spread (scalar, same for all channels) |
+| `inter_delay_mean` | $\frac{1}{C}\sum_j \frac{1}{N \cdot n_b}\sum_{n,b} \text{inter\\_delay}[n,j,b]$ | Average alignment cost from block scale differences |
+| `intra_delay_mean` | $\frac{1}{N \cdot n_b \cdot b_s}\sum_{n,b,k} \text{intra\\_delay}[n,b,k]$ | Average element-level exponent spread (scalar, same for all channels) |
 
 Where:
-- $\text{inter\_delay}[n,j,b] = E_{\max}[n,j] - \lfloor \log_2(x\_scale[n,b] \cdot w\_scale[j,b]) \rfloor$ is the inter-block alignment delay. Each block's combined scale may differ; the MSD pipeline must align all blocks to the dominant block, costing delay cycles for smaller blocks.
-- $\text{intra\_delay}[n,b,k] = e_{\max}[n,b] - \lfloor \log_2(|x_q[n,b,k]|) \rfloor$ is the intra-block delay from element-level activation exponent differences within each block. Elements with smaller magnitudes within a block start producing significant digits later.
+- $\text{inter\\_delay}[n,j,b] = E_{\max}[n,j] - \lfloor \log_2(x\\_\text{scale}[n,b] \cdot w\\_\text{scale}[j,b]) \rfloor$ is the inter-block alignment delay. Each block's combined scale may differ; the MSD pipeline must align all blocks to the dominant block, costing delay cycles for smaller blocks.
+- $\text{intra\\_delay}[n,b,k] = e_{\max}[n,b] - \lfloor \log_2(|x_q[n,b,k]|) \rfloor$ is the intra-block delay from element-level activation exponent differences within each block. Elements with smaller magnitudes within a block start producing significant digits later.
 
 **Effective precision:**
 
@@ -729,7 +729,7 @@ Where:
 | `eff_precision_mean` | $\frac{1}{C}\sum_j \frac{1}{N \cdot n_b \cdot b_s}\sum_{n,b,k} p_{\text{eff}}[n,j,b,k]$ | Average useful precision after delay overhead |
 | `eff_precision_min` | $\min_j \min_{n,b,k} p_{\text{eff}}[n,j,b,k]$ | Worst-case precision across all elements |
 
-Where $p_{\text{eff}}[n,j,b,k] = \max(0,\; B_j - \text{inter\_delay}[n,j,b] - \text{intra\_delay}[n,b,k] - \delta)$ is the effective precision — the number of BSD digits actually computed for element $(n,j,b,k)$. Here $\delta$ is the MSD online delay (default 2). The effective precision represents the *useful computation cycles* remaining after accounting for all three sources of delay. A low `eff_precision_mean` relative to `budget_mean` indicates that delays consume most of the budget.
+Where $p_{\text{eff}}[n,j,b,k] = \max(0,\; B_j - \text{inter\\_delay}[n,j,b] - \text{intra\\_delay}[n,b,k] - \delta)$ is the effective precision — the number of BSD digits actually computed for element $(n,j,b,k)$. Here $\delta$ is the MSD online delay (default 2). The effective precision represents the *useful computation cycles* remaining after accounting for all three sources of delay. A low `eff_precision_mean` relative to `budget_mean` indicates that delays consume most of the budget.
 
 **Signal power:**
 
