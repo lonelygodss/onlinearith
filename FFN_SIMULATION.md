@@ -3,15 +3,15 @@
 Detailed technical explanation of how the simulation models MSD-first online arithmetic
 through the entire Feed-Forward Network (FFN / MLP) of the Qwen3 transformer.
 
-**Design document:** [Silu-msd_plan.md](Silu-msd_plan.md) — Hardware-perspective SiLU unit design
-
 ---
 
 ## 1. FFN Layer Structure
 
 The Qwen3 MLP (Gated Linear Unit variant) computes:
 
-$$\text{FFN}(x) = W_\text{down} \cdot \bigl[\text{SiLU}(W_\text{gate} \cdot x) \odot (W_\text{up} \cdot x)\bigr]$$
+```
+FFN(x) = W_down * [ SiLU(W_gate * x) ⊙ (W_up * x) ]
+```
 
 This decomposes into five computational stages:
 
@@ -37,9 +37,11 @@ Before MSD truncation, activations and weights are quantized to a Microscaling (
 block format (MXFP8, MXFP6, or MXFP4). Each block of 32 elements shares a single
 FP8 scale factor:
 
-$$x[n, b, k] = \text{scale}_x[n, b] \cdot x_q[n, b, k]$$
+```
+x[n, b, k] = scale_x[n, b] * x_q[n, b, k]
+```
 
-where $b$ is the block index, $k$ is the element within the block, and $x_q$ is the
+where `b` is the block index, `k` is the element within the block, and `x_q` is the
 quantized element value.
 
 ### 2.2 BSD (NAF) Representation
@@ -60,19 +62,52 @@ plain binary (e.g., `7 = 0b111` in binary but `100(-1)` in NAF = 4 digit positio
 This makes BSD truncation behaviour distinct from binary truncation — the error is
 **bidirectional** (can be positive or negative) rather than always rounding toward zero.
 
-### 2.3 BSDMetadata
+### 2.3 Exponent / Mantissa Separation Principle
+
+A key design principle of the MSD-first pipeline is that **exponent and BSD mantissa
+are kept as separate as possible**, avoiding combinatorial shift-and-align hardware.
+
+- **Exponent** propagates as parallel metadata, available immediately (before the
+  first BSD mantissa digit arrives). For GEMM outputs, it equals `E_max` — the maximum
+  combined block-scale exponent per output channel — known from MXFP block scales alone.
+
+- **BSD mantissa** flows serially in the MSD-first digit stream. Each cycle produces
+  one more valid digit, starting from the most-significant digit.
+
+Necessary alignment between blocks of different magnitude is offloaded to the **time
+domain**: smaller blocks are simply delayed (start their MSD stream later) rather than
+being shifted by combinatorial hardware. This is precisely the inter-block delay
+mechanism in the GEMM. The separation provides extra pipelining opportunity and
+enables early termination to exploit dynamic-range sparsity (MAC sparsity).
+
+### 2.4 BSDMetadata
 
 When BSD representation penetrates through the FFN, each intermediate value carries
 per-element metadata:
 
 ```python
 class BSDMetadata:
-    exponent:  (N, dim) float32  # floor(log2(|value|)) per element
-    precision: (N, dim) float32  # valid NAF digits remaining
+    exponent:  (N, dim) float32  # MSD position (from block scales, not output value)
+    precision: (N, dim) float32  # valid BSD mantissa digits remaining
 ```
 
+For GEMM outputs:
+
+- `exponent = E_max` — the maximum combined block-scale exponent per (sample,
+  output-channel) pair. This is known from MXFP block scales before any BSD
+  mantissa digit arrives.
+- `precision = B_final - delta` — the cycle budget minus the online startup delay.
+  Inter-block delays are **NOT** subtracted here, because they already govern
+  per-element product truncation inside the GEMM. Once the first MSD of the
+  accumulator output arrives, every cycle produces one more valid digit.
+
+For element-wise operations (SiLU, gating multiply):
+
+- `exponent` is recomputed from the truncated result value.
+- `precision` is the input precision minus the operation's cycle cost.
+
 This metadata propagates from one stage to the next, allowing downstream operations
-to know exactly how many valid digits each input element has.
+to know exactly how many valid digits each input element has, and at what scale.
 
 ---
 
@@ -81,32 +116,41 @@ to know exactly how many valid digits each input element has.
 ### 3.1 GEMM Stages: gate_proj, up_proj (Stages 1a, 1b)
 
 Each GEMM computes a block-quantized dot-product with MSD truncation. The algorithm
-for a single output element `out[n,j]` (sample $n$, output channel $j$):
+for a single output element `out[n,j]` (sample n, output channel j):
 
-$$\text{out}[n,j] = \sum_{b=0}^{n_b-1} s_x[n,b] \cdot s_w[j,b] \cdot \sum_{k=0}^{31} x_q[n,b,k] \cdot w_q[j,b,k]$$
+```
+out[n,j] = sum_b  s_x[n,b] * s_w[j,b] * sum_k  x_q[n,b,k] * w_q[j,b,k]
+```
 
 **Step 1: Inter-block delay computation**
 
 Each block has a combined scale exponent:
 
-$$E_i[n,j,b] = \lfloor\log_2(s_x[n,b] \cdot s_w[j,b])\rfloor$$
+```
+E_i[n,j,b] = floor(log2(s_x[n,b] * s_w[j,b]))
+```
 
 The dominant block has the maximum exponent:
 
-$$E_\text{max}[n,j] = \max_b E_i[n,j,b]$$
+```
+E_max[n,j] = max_b  E_i[n,j,b]
+```
 
 In the MSD-first pipeline, all blocks must be aligned to the dominant block's digit
-position. Smaller blocks are delayed:
+position. Smaller blocks are delayed (alignment via time domain, no shift hardware):
 
-$$\text{inter\_delay}[n,j,b] = E_\text{max}[n,j] - E_i[n,j,b]$$
+```
+inter_delay[n,j,b] = E_max[n,j] - E_i[n,j,b]
+```
 
 **Step 2: Intra-block delay computation**
 
 Within each block, element-level activation exponents differ:
 
-$$e_k[n,b,k] = \lfloor\log_2(|x_q[n,b,k]|)\rfloor$$
-
-$$\text{intra\_delay}[n,b,k] = e_\text{max}[n,b] - e_k[n,b,k]$$
+```
+e_k[n,b,k] = floor(log2(|x_q[n,b,k]|))
+intra_delay[n,b,k] = e_max[n,b] - e_k[n,b,k]
+```
 
 Elements with smaller magnitudes start producing significant digits later in the
 serial BSD stream.
@@ -115,69 +159,93 @@ serial BSD stream.
 
 The per-(sample, channel) cycle budget is resolved through a three-tier system:
 
-$$B_\text{final}[n,j] = B_\text{base}[j] + \Delta B[n,j]$$
+```
+B_final[n,j] = B_base[j] + delta_B[n,j]
+```
 
-where $B_\text{base}$ comes from uniform config or offline calibration, and $\Delta B$
+where `B_base` comes from uniform config or offline calibration, and `delta_B`
 is a runtime dynamic adjustment based on combined scale exponents.
 
 **Step 4: Effective precision per element**
 
-$$p_\text{eff}[n,j,b,k] = \max\bigl(0,\ B_\text{final}[n,j] - \text{inter\_delay}[n,j,b] - \text{intra\_delay}[n,b,k] - \delta\bigr)$$
+```
+p_eff[n,j,b,k] = max(0,  B_final[n,j] - inter_delay[n,j,b] - intra_delay[n,b,k] - delta)
+```
 
-where $\delta$ is the MSD online multiplier delay (default 2 cycles).
+where `delta` is the MSD online multiplier delay (default 2 cycles).
 
 **Step 5: BSD (NAF) truncation**
 
-Each partial product $x_q[n,b,k] \cdot w_q[j,b,k]$ is converted to NAF and truncated
-to $p_\text{eff}$ most-significant digits. The truncated products are summed and
+Each partial product `x_q[n,b,k] * w_q[j,b,k]` is converted to NAF and truncated
+to `p_eff` most-significant digits. The truncated products are summed and
 rescaled by the block scales.
 
 **Step 6: BSD metadata extraction (when returning metadata)**
 
-When the GEMM is asked to return BSD metadata (for use by downstream stages):
+When the GEMM returns BSD metadata (for use by downstream stages):
 
-$$\text{exponent}[n,j] = \lfloor\log_2(|\text{out}[n,j]|)\rfloor$$
-$$\text{precision}[n,j] = \max\bigl(0,\ B_\text{final}[n,j] - \max_b(\text{inter\_delay}[n,j,b]) - \delta\bigr)$$
+```
+exponent[n,j]  = E_max[n,j]       (from block scales, known before BSD stream)
+precision[n,j] = max(0, B_final[n,j] - delta)
+```
 
-This precision estimate is conservative (uses the worst-case inter-block delay).
+The exponent comes directly from the GEMM's block-scale computation (`E_max`),
+not from the computed output value. This keeps exponent and mantissa metadata
+separate — the exponent is available as parallel metadata before any BSD digit flows.
+
+The precision is `B_final - delta` (budget minus online startup delay). Inter-block
+delays are **not** subtracted: they already govern per-element product truncation
+in Steps 4-5. Once the accumulator's first MSD arrives, every subsequent cycle
+produces one additional valid digit. If the flow has produced 8 MSDs, the precision
+is 8 regardless of how large the max inter-block delay was.
 
 ### 3.2 SiLU Activation (Stage 2): PWL Approximation
 
-The SiLU function $f(x) = x \cdot \sigma(x)$ is decomposed as:
+The SiLU function `f(x) = x * sigmoid(x)` is decomposed as:
 
-$$\text{SiLU}(x) = x \cdot \sigma_\text{PWL}(x)$$
+```
+SiLU(x) = x * sigmoid_PWL(x)
+```
 
-where $\sigma_\text{PWL}$ is a piecewise-linear approximation of the sigmoid function.
+where `sigmoid_PWL` is a piecewise-linear approximation of the sigmoid function.
 
 #### Hardware Architecture
 
-The SiLU unit is a three-sub-module pipeline (see [Silu-msd_plan.md](Silu-msd_plan.md)):
+The SiLU unit is a two-sub-module pipeline:
 
-1. **Segment Detector** (~3 cycles): Reads the first few MSDs of $x$ to determine
-   which of $N$ linear segments (default 8) applies. Since $x$ arrives MSD-first,
-   the integer part is available within the first 2-3 digits.
+1. **Segment Detection (0 cycles from BSD stream)**: Uses `BSDMetadata.exponent`
+   (available as parallel metadata from the upstream GEMM block scales) to determine
+   which of N linear segments (default 8) applies. Because exponent is already known
+   before the BSD mantissa stream begins, this detection costs zero cycles from the
+   mantissa perspective. The sign bit (also parallel metadata) determines the sign of
+   the input for the LUT lookup.
 
-2. **Coefficient Lookup** (~0 cycles, pipelined): A small LUT provides slope $a_i$
-   and intercept $b_i$ in parallel format (no serialization needed for constants).
+2. **Coefficient Lookup (~0 cycles, pipelined)**: A small LUT provides slope `a_i`
+   and intercept `b_i` in parallel format (no serialization needed for constants).
 
-3. **Online MAC** (~3 cycles): Computes $a_i \cdot x + b_i$ using an online
-   multiplier ($\delta=2$) and online adder ($\delta=1$).
+3. **Online MAC (3 cycles)**: Computes `a_i * x + b_i` using an online
+   multiplier (delta=2) and online adder (delta=1).
 
-The total SiLU latency is modelled as:
+4. **SiLU multiply (2 cycles)**: Computes `x * sigmoid_PWL(x)` using an online
+   multiplier (delta=2).
 
-$$\delta_\text{SiLU} = 6 \text{ cycles}$$
+The total SiLU latency is:
 
-(3 detect + 1 PWL eval + 2 online multiply)
+```
+SiLU_latency = 0 (segment detect) + 3 (PWL eval) + 2 (SiLU multiply) = 5 cycles
+```
 
 #### Simulation Implementation
 
-The PWL sigmoid approximation divides $[-6, 6]$ into $N$ segments (default 8).
-For each segment $[x_i, x_{i+1}]$:
+The PWL sigmoid approximation divides `[-6, 6]` into N segments (default 8).
+For each segment `[x_i, x_{i+1}]`:
 
-$$\sigma_\text{PWL}(x) = a_i \cdot x + b_i$$
+```
+sigmoid_PWL(x) = a_i * x + b_i
+```
 
-where $a_i$ and $b_i$ are computed by linear interpolation of the exact sigmoid at
-segment boundaries. Values outside $[-6, 6]$ are saturated (0 or 1).
+where `a_i` and `b_i` are computed by linear interpolation of the exact sigmoid at
+segment boundaries. Values outside `[-6, 6]` are saturated (0 or 1).
 
 The simulation uses `torch.searchsorted` for segment detection (modelling the
 hardware segment detector) and computes:
@@ -190,12 +258,15 @@ silu_out = x * sigmoid_pwl(x)
 
 The output precision is the input precision minus the SiLU latency:
 
-$$p_\text{out}[n,j] = \max\bigl(0,\ p_\text{in}[n,j] - \delta_\text{SiLU}\bigr)$$
+```
+p_out[n,j] = max(0,  p_in[n,j] - 5)
+```
 
-The result is then truncated to $p_\text{out}$ BSD digits via `_msd_truncate()`.
-A new `BSDMetadata` is created from the truncated output.
+The result is then truncated to `p_out` BSD digits via `_msd_truncate()`.
+A new `BSDMetadata` is created with exponent recomputed from the truncated output
+(because SiLU changes the magnitude) and precision set to `p_out`.
 
-### 3.3 Gating Multiply (Stage 3): Element-wise `SiLU(gate) ⊙ up`
+### 3.3 Gating Multiply (Stage 3): Element-wise SiLU(gate) * up
 
 Two BSD streams — the SiLU output and the up_proj output — are multiplied
 element-wise using an online multiplier.
@@ -205,13 +276,15 @@ element-wise using an online multiplier.
 The output precision is limited by the *less precise* of the two inputs, minus the
 online multiplier delay:
 
-$$p_\text{gating}[n,j] = \max\bigl(0,\ \min(p_\text{silu}[n,j],\ p_\text{up}[n,j]) - \delta\bigr)$$
+```
+p_gating[n,j] = max(0,  min(p_silu[n,j], p_up[n,j]) - delta)
+```
 
-where $\delta$ is the online delay (default 2 cycles). The `min` reflects the hardware
+where `delta` is the online delay (default 2 cycles). The `min` reflects the hardware
 constraint that the multiplier cannot produce a digit until both inputs have a digit
 available at that position.
 
-The result is truncated to $p_\text{gating}$ digits and a new `BSDMetadata` is created.
+The result is truncated to `p_gating` digits and a new `BSDMetadata` is created.
 
 ### 3.4 down_proj (Stage 4): BSD-Input GEMM
 
@@ -220,18 +293,20 @@ freshly quantized MXFP values). This requires a special GEMM variant that differ
 from the standard path in two ways:
 
 1. **No MXFP re-quantization of the input**: The BSD values are directly reshaped into
-   blocks and used with unit activation scales ($s_x = 1$). Only the weights are
-   MXFP-quantized.
+   blocks. Block scales are computed from actual input magnitudes (for inter-block
+   alignment). Only the weights are MXFP-quantized.
 
 2. **Input precision caps effective precision**: Each input element already has a known
    precision from the gating stage. The effective precision of each partial product is:
 
-$$p_\text{eff}[n,j,b,k] = \min\bigl(p_\text{budget}[n,j,b,k],\ p_\text{input\_bsd}[n,b,k]\bigr)$$
+```
+p_eff[n,j,b,k] = min(p_budget[n,j,b,k], p_input_bsd[n, b*32+k])
+```
 
-where $p_\text{budget}$ is the standard budget-limited precision (from delays and
-budget allocation) and $p_\text{input\_bsd}$ is the per-element input precision from
+where `p_budget` is the standard budget-limited precision (from delays and
+budget allocation) and `p_input_bsd` is the per-element input precision from
 the gating stage. This models the hardware reality that a serial BSD stream with only
-$P$ valid digits cannot contribute more than $P$ digits to a downstream product,
+P valid digits cannot contribute more than P digits to a downstream product,
 regardless of how many cycles the accumulator runs.
 
 ---
@@ -281,19 +356,21 @@ than what a fresh MXFP quantization would provide).
 ### 4.2 Mode 2: Deep Pipeline (`msd_deep_pipeline = true`)
 
 **Concept:** The gate_proj→SiLU→gating chain is treated as a single time-domain
-pipeline with a unified cycle budget $B_\text{pipe}$. The pipeline budget is split
+pipeline with a unified cycle budget `B_pipe`. The pipeline budget is split
 between the GEMM stages and the intermediate operations.
 
 **Cycle allocation:**
 
-$$T_\text{gemm} = B_\text{pipe} - \delta_\text{SiLU} - \delta_\text{online}$$
+```
+T_gemm = B_pipe - SiLU_latency - online_delay
+```
 
 where:
-- $B_\text{pipe}$ = `msd_pipeline_budget` (default 24 cycles)
-- $\delta_\text{SiLU}$ = 6 cycles (PWL SiLU latency)
-- $\delta_\text{online}$ = 2 cycles (gating multiplier delay)
+- `B_pipe` = `msd_pipeline_budget` (default 24 cycles)
+- `SiLU_latency` = 5 cycles (PWL SiLU latency)
+- `online_delay` = 2 cycles (gating multiplier delay)
 
-This gives $T_\text{gemm} = 24 - 6 - 2 = 16$ cycles for each GEMM (gate and up).
+This gives `T_gemm = 24 - 5 - 2 = 17` cycles for each GEMM (gate and up).
 
 **Data flow:**
 
@@ -301,12 +378,12 @@ This gives $T_\text{gemm} = 24 - 6 - 2 = 16$ cycles for each GEMM (gate and up).
 x (MXFP input)
 ├── gate_proj(x, budget=T_gemm) → gate_out, gate_bsd    [budget overridden]
 │       ↓
-│   SiLU_PWL(gate_out, gate_bsd) → silu_out, silu_bsd   [costs δ_SiLU cycles]
+│   SiLU_PWL(gate_out, gate_bsd) → silu_out, silu_bsd   [costs 5 cycles]
 │       ↓
 ├── up_proj(x, budget=T_gemm)   → up_out, up_bsd        [budget overridden]
 │       ↓
 │   gating_mul(silu_out, silu_bsd, up_out, up_bsd) → gating_out, gating_bsd
-│       ↓                                               [costs δ_online cycles]
+│       ↓                                               [costs 2 cycles]
 └── down_proj(gating_out, input_bsd=gating_bsd, budget=B_std)
         ↓                                               [independent budget]
     result
@@ -319,7 +396,7 @@ budget from `msd_cycle_budget`. This is because down_proj's input must be transp
 natural pipeline break point.
 
 **Implementation detail:** The simulation temporarily overrides `config.msd_cycle_budget`
-to $T_\text{gemm}$ for the gate and up projections, then restores it before down_proj.
+to `T_gemm` for the gate and up projections, then restores it before down_proj.
 This ensures the existing per-channel budget resolution machinery (calibration, dynamic
 adjustment) applies at the reduced budget.
 
@@ -338,11 +415,11 @@ adjustment) applies at the reduced budget.
 
 | Aspect | Mode 1 (BSD Penetration) | Mode 2 (Deep Pipeline) |
 |--------|-------------------------|------------------------|
-| gate/up GEMM budget | `msd_cycle_budget` (full) | $B_\text{pipe} - \delta_\text{SiLU} - \delta_\text{online}$ |
+| gate/up GEMM budget | `msd_cycle_budget` (full) | `B_pipe - 5 - delta` |
 | down_proj budget | `msd_cycle_budget` (full) | `msd_cycle_budget` (independent) |
 | SiLU cost | Precision loss on output only | Subtracted from pipeline budget |
 | Gating cost | Precision loss on output only | Subtracted from pipeline budget |
-| Total cycles per FFN | $3 \times B_\text{cycle}$ | $B_\text{pipe} + B_\text{cycle}$ (2 stages) |
+| Total cycles per FFN | `3 * B_cycle` | `B_pipe + B_cycle` (2 stages) |
 | Use case | Maximum per-GEMM precision | Time-constrained pipeline |
 | Hardware model | Independent GEMM engines | Single pipeline engine + separate down_proj |
 
@@ -350,38 +427,73 @@ adjustment) applies at the reduced budget.
 
 ## 5. Precision Propagation Through the FFN
 
-The diagram below traces per-element precision through all FFN stages with concrete
-numbers (Mode 2, $B_\text{pipe}=24$, $\delta=2$, $\delta_\text{SiLU}=6$):
+### 5.1 Mode 1 (BSD Penetration) with B = 16, delta = 2, SiLU = 5 cycles
 
 ```
-gate_proj GEMM (budget = T_gemm = 16)
+gate_proj GEMM (budget = B = 16)
 │
-│  Typical p_eff after delays: ~12 digits (varies per element)
-│  → gate_bsd.precision ≈ B_final - max_inter_delay - δ ≈ 12
+│  gate_bsd.precision = B_final - delta = 16 - 2 = 14 digits
+│  gate_bsd.exponent  = E_max (from block scales)
 │
-↓ SiLU_PWL  (costs δ_SiLU = 6 cycles)
+↓ SiLU_PWL  (costs 5 cycles)
 │
-│  p_silu = max(0, gate_bsd.precision - 6) ≈ 6 digits
-│  Truncate to 6 NAF digits
+│  p_silu = max(0, 14 - 5) = 9 digits
+│  Truncate to 9 NAF digits
 │
-↓ Gating multiply  (costs δ_online = 2 cycles)
+├── up_proj GEMM (budget = B = 16)
+│   up_bsd.precision = 14 digits
 │
-│  up_bsd.precision ≈ 12 (from up_proj)
-│  p_gating = max(0, min(p_silu, p_up) - 2) = max(0, min(6, 12) - 2) = 4
-│  Truncate to 4 NAF digits
+↓ Gating multiply  (costs delta = 2 cycles)
 │
-↓ down_proj BSD-input GEMM (budget = B_std = 16)
+│  p_gating = max(0, min(9, 14) - 2) = 7 digits
+│  Truncate to 7 NAF digits
 │
-│  Input precision = gating_bsd.precision ≈ 4
-│  p_eff = min(budget_limited, input_precision) — input precision is the bottleneck
-│  Effective precision capped at 4 for most elements
+↓ down_proj BSD-input GEMM (budget = B = 16)
+│
+│  Input precision = gating_bsd.precision = 7
+│  p_eff = min(budget_limited, input_precision)
+│  Input precision is the bottleneck for most elements
 │
 ↓ result
 ```
 
-This shows the precision funnel effect: the pipeline budget of 24 cycles yields
-approximately 4 effective precision digits at the down_proj input. The per-element
-variation comes from the actual delay profile of each channel.
+### 5.2 Mode 2 (Deep Pipeline) with B_pipe = 24, B_std = 16, delta = 2, SiLU = 5
+
+```
+T_gemm = 24 - 5 - 2 = 17
+
+gate_proj GEMM (budget = T_gemm = 17)
+│
+│  gate_bsd.precision = 17 - 2 = 15 digits
+│  gate_bsd.exponent  = E_max (from block scales)
+│
+↓ SiLU_PWL  (costs 5 cycles)
+│
+│  p_silu = max(0, 15 - 5) = 10 digits
+│  Truncate to 10 NAF digits
+│
+├── up_proj GEMM (budget = T_gemm = 17)
+│   up_bsd.precision = 15 digits
+│
+↓ Gating multiply  (costs delta = 2 cycles)
+│
+│  p_gating = max(0, min(10, 15) - 2) = 8 digits
+│  Truncate to 8 NAF digits
+│
+↓ down_proj BSD-input GEMM (budget = B_std = 16)
+│
+│  Input precision = gating_bsd.precision = 8
+│  p_eff = min(budget_limited, input_precision)
+│  Input precision is the bottleneck for most elements
+│
+↓ result
+```
+
+Note: The previous (incorrect) model subtracted `max_inter_delay` from the GEMM output
+precision, which could yield 0 for channels with large inter-block delays. The corrected
+model recognises that inter-block delays already govern per-element product truncation
+inside the GEMM, and the output stream precision depends only on budget minus startup
+delay.
 
 ---
 
@@ -391,26 +503,27 @@ The BSD-input variant (`_forward_msd_truncated_bsd_input`) differs from the stan
 MSD GEMM in how it handles input activations. Here is the step-by-step:
 
 **Standard GEMM path (gate_proj, up_proj):**
-1. Quantize input $x$ to MXFP → get $x_q$ (quantized) and $s_x$ (block scales)
-2. Use $x_q$ and $s_x$ in the delay/budget/truncation pipeline
+1. Quantize input `x` to MXFP → get `x_q` (quantized) and `s_x` (block scales)
+2. Use `x_q` and `s_x` in the delay/budget/truncation pipeline
 3. Return output + optional BSDMetadata
 
 **BSD-input GEMM path (down_proj with `input_bsd`):**
 1. Skip MXFP quantization entirely — use raw float values
-2. Reshape input into blocks: $x_\text{blocks}[n, n_b, b_s]$
-3. Set $s_x = 1$ for all blocks (no block scaling on input side)
-4. Compute block-level exponents: $e_\text{max}[n,b] = \lfloor\log_2(\max_k |x_\text{blocks}[n,b,k]|)\rfloor$
-5. Compute intra-block delays normally from element exponents
-6. Compute inter-block delays from weight scales only (since $s_x = 1$)
-7. Compute budget-limited precision $p_\text{budget}$ as usual
-8. **Cap by input BSD precision:**
+2. Reshape input into blocks: `x_blocks[n, nb, bs]`
+3. Compute block scales from actual magnitudes: `s_x[n,b] = max_k |x_blocks[n,b,k]|`
+4. Compute intra-block delays normally from element exponents
+5. Compute inter-block delays from combined `s_x` and weight scales
+6. Compute budget-limited precision `p_budget` as usual
+7. **Cap by input BSD precision:**
 
-$$p_\text{eff}[n,j,b,k] = \min(p_\text{budget}[n,j,b,k],\ p_\text{input\_bsd}[n, b \cdot 32 + k])$$
+```
+p_eff[n,j,b,k] = min(p_budget[n,j,b,k], p_input_bsd[n, b*32+k])
+```
 
-9. Truncate products and accumulate as normal
+8. Truncate products and accumulate as normal
 
-The `min` in step 8 is the key difference. It models the physical constraint that a
-BSD digit stream with only $P$ valid digits cannot contribute more than $P$ digits
+The `min` in step 7 is the key difference. It models the physical constraint that a
+BSD digit stream with only P valid digits cannot contribute more than P digits
 to any downstream computation, regardless of how long the accumulator runs.
 
 ---
@@ -421,12 +534,14 @@ to any downstream computation, regardless of how long the accumulator runs.
 
 The function `_build_pwl_sigmoid_lut(n_segments, device)` constructs the lookup table:
 
-1. Divide $[-6, 6]$ into `n_segments` equal intervals
-2. Evaluate exact $\sigma(x) = 1/(1+e^{-x})$ at each boundary
+1. Divide `[-6, 6]` into `n_segments` equal intervals
+2. Evaluate exact `sigmoid(x) = 1/(1+exp(-x))` at each boundary
 3. Compute slope and intercept per segment by linear interpolation:
 
-$$a_i = \frac{\sigma(x_{i+1}) - \sigma(x_i)}{x_{i+1} - x_i}$$
-$$b_i = \sigma(x_i) - a_i \cdot x_i$$
+```
+a_i = (sigmoid(x_{i+1}) - sigmoid(x_i)) / (x_{i+1} - x_i)
+b_i = sigmoid(x_i) - a_i * x_i
+```
 
 The LUT is cached per (n_segments, device) combination.
 
@@ -435,21 +550,22 @@ The LUT is cached per (n_segments, device) combination.
 The function `_pwl_sigmoid(x, n_segments=8)`:
 
 1. Use `torch.searchsorted` to find segment index for each element (models the
-   leading-digit segment detector in hardware)
-2. Evaluate $a_i \cdot x + b_i$ (models the online MAC: multiply by parallel
+   exponent-based segment detector in hardware)
+2. Evaluate `a_i * x + b_i` (models the online MAC: multiply by parallel
    coefficient, add parallel intercept)
-3. Clamp result to $[0, 1]$
+3. Clamp result to `[0, 1]`
 
 ### 7.3 Full SiLU with BSD Metadata
 
 The function `_msd_silu_pwl(x, input_bsd, n_segments, online_delay)`:
 
-1. Compute PWL sigmoid: $\sigma_\text{PWL}(x)$
-2. Compute SiLU: $y = x \cdot \sigma_\text{PWL}(x)$
-3. Compute output precision: $p_\text{out} = \max(0, p_\text{in} - \delta_\text{SiLU})$
-4. Truncate $y$ to $p_\text{out}$ NAF digits
-5. Compute output exponent from truncated result
-6. Return $(y_\text{truncated}, \text{BSDMetadata}(e_\text{out}, p_\text{out}))$
+1. Use `input_bsd.exponent` for segment detection (0 cycles — parallel metadata)
+2. Compute PWL sigmoid: `sigmoid_PWL(x)`
+3. Compute SiLU: `y = x * sigmoid_PWL(x)`
+4. Compute output precision: `p_out = max(0, p_in - 5)`
+5. Truncate `y` to `p_out` NAF digits
+6. Compute output exponent from truncated result
+7. Return `(y_truncated, BSDMetadata(e_out, p_out))`
 
 ---
 
@@ -458,15 +574,15 @@ The function `_msd_silu_pwl(x, input_bsd, n_segments, online_delay)`:
 The function `_msd_gating_mul(silu_val, silu_bsd, up_val, up_bsd, online_delay)`:
 
 1. Compute output precision:
-$$p_\text{gating} = \max\bigl(0,\ \min(p_\text{silu}, p_\text{up}) - \delta\bigr)$$
+   `p_gating = max(0, min(p_silu, p_up) - delta)`
 
-2. Compute element-wise product: $y = \text{silu\_val} \times \text{up\_val}$
+2. Compute element-wise product: `y = silu_val * up_val`
 
-3. Truncate to $p_\text{gating}$ NAF digits
+3. Truncate to `p_gating` NAF digits
 
 4. Compute output exponent from truncated result
 
-5. Return $(y_\text{truncated}, \text{BSDMetadata}(e_\text{out}, p_\text{gating}))$
+5. Return `(y_truncated, BSDMetadata(e_out, p_gating))`
 
 The `min(p_silu, p_up)` reflects the hardware reality that an online multiplier
 cannot produce valid output digits faster than its slowest input stream.
@@ -478,11 +594,11 @@ cannot produce valid output digits faster than its slowest input stream.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `msd_bsd_penetration` | bool | false | Enable Mode 1: BSD representation flows through the entire FFN without MXFP re-quantization between stages |
-| `msd_deep_pipeline` | bool | false | Enable Mode 2: Unified pipeline budget for gate→SiLU→gating chain |
-| `msd_pipeline_budget` | int | 24 | Pipeline cycle budget $B_\text{pipe}$ (Mode 2 only). GEMM budget = $B_\text{pipe} - \delta_\text{SiLU} - \delta_\text{online}$ |
+| `msd_deep_pipeline` | bool | false | Enable Mode 2: Unified pipeline budget for gate-SiLU-gating chain |
+| `msd_pipeline_budget` | int | 24 | Pipeline cycle budget `B_pipe` (Mode 2 only). GEMM budget = `B_pipe - 5 - delta` |
 | `msd_silu_pwl_segments` | int | 8 | Number of linear segments for PWL sigmoid approximation |
 | `msd_cycle_budget` | int | 16 | Standard per-GEMM cycle budget (Mode 1: all GEMMs; Mode 2: down_proj only) |
-| `msd_online_delay` | int | 2 | Online multiplier delay $\delta$ (used in GEMM, SiLU, and gating) |
+| `msd_online_delay` | int | 2 | Online multiplier delay `delta` (used in GEMM, SiLU, and gating) |
 
 ### Interaction between modes
 
@@ -505,8 +621,8 @@ cannot produce valid output digits faster than its slowest input stream.
 | Function | Purpose |
 |----------|---------|
 | `_msd_truncate(value, num_digits)` | Core BSD (NAF) truncation to N most-significant digits |
-| `BSDMetadata` | Per-element exponent + precision tracking |
-| `_extract_bsd_metadata(output, b_final, inter_delays, online_delay)` | Extract BSD metadata from GEMM output |
+| `BSDMetadata` | Per-element exponent (E_max) + mantissa precision tracking |
+| `_extract_bsd_metadata(output, b_final, e_max, online_delay)` | Extract BSD metadata from GEMM output |
 | `_build_pwl_sigmoid_lut(n_segments, device)` | Construct PWL sigmoid LUT |
 | `_pwl_sigmoid(x, n_segments)` | Evaluate PWL sigmoid (cached) |
 | `_msd_silu_pwl(x, input_bsd, n_segments, online_delay)` | SiLU with BSD metadata propagation |
@@ -523,14 +639,16 @@ The simulation maps to the following hardware components:
 
 | Simulation Operation | Hardware Unit | Cycle Cost |
 |---------------------|---------------|------------|
-| `_forward_msd_truncated` | MSD-first CiM dot-product array | $B_\text{budget}$ cycles per output |
-| `_pwl_sigmoid` searchsorted | Segment detector (leading-digit evaluator) | ~3 cycles |
-| sigmoid × input | Online multiplier (serial × parallel) | ~2 cycles |
-| intercept addition | Online adder (pipelined) | ~1 cycle |
-| `_msd_gating_mul` | Online element-wise multiplier | $\delta$ = 2 cycles |
+| `_forward_msd_truncated` | MSD-first CiM dot-product array | `B_budget` cycles per output |
+| `_pwl_sigmoid` searchsorted | Segment detector (uses exponent metadata) | 0 from BSD stream |
+| Coefficient lookup | LUT for slope/intercept (parallel constants) | 0 (pipelined) |
+| sigmoid PWL eval | Online multiply (slope*x) + online add (+intercept) | 3 cycles |
+| SiLU multiply (x * sigmoid) | Online multiplier (serial x serial) | 2 cycles |
+| `_msd_gating_mul` | Online element-wise multiplier | `delta` = 2 cycles |
 | `_msd_truncate` | Hardware early termination (stop clocking after P digits) | 0 (implicit) |
-| `_forward_msd_truncated_bsd_input` | CiM array with pre-existing BSD input stream | $B_\text{budget}$ cycles (capped by input precision) |
-| FIFO delay buffer | up_proj result holds in buffer during SiLU | $\delta_\text{SiLU}$ = 6 entries |
+| `_forward_msd_truncated_bsd_input` | CiM array with pre-existing BSD input stream | `B_budget` cycles (capped by input precision) |
+| FIFO delay buffer | up_proj result holds in buffer during SiLU | 5 entries |
+| BSDMetadata.exponent | Parallel metadata register (from block scales) | 0 (available before BSD stream) |
 
 The simulation does not model:
 - Actual FIFO buffering between stages (assumes instant availability after delay)
