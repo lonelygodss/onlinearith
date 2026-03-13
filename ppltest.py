@@ -15,6 +15,7 @@ Predefined setups (same numbering as ppl_batch.py):
     python ppltest.py --list                               # list all setups
     python ppltest.py --setup 6                            # MXFP8 + MSD B=16
     python ppltest.py --nproc 3 --gpus 4,5,6 --setup 2
+    python ppltest.py --setup 6 --limit-samples 100        # light mode: fast run for testing
 
 Each GPU loads a full model copy and processes a shard of the 578 sliding
 windows.  Partial NLL sums are aggregated via NCCL all_reduce.
@@ -110,7 +111,8 @@ def main():
 examples:
   python ppltest.py --list                                # list all setups
   python ppltest.py --nproc 8 --setup 6                   # MXFP8 + MSD B=16
-  python ppltest.py --nproc 4 --gpus 4,5,6,7 --setup 6   # specific GPUs
+  python ppltest.py --nproc 4 --gpus 4,5,6,7 --setup 6    # specific GPUs
+  python ppltest.py --setup 6 --limit-samples 20          # light mode: fast run
   python ppltest.py --setup 6 --calibration calibration_MXFP8.json
 
 calibration workflow:
@@ -145,6 +147,9 @@ calibration workflow:
                         help="Transformer layer index for which full per-channel "
                              "MSD performance detail is recorded in the output JSON. "
                              "All other layers only get compact summaries. (default: 2)")
+    parser.add_argument("--limit-samples", type=int, default=None, metavar="N",
+                        help="Light mode: limit the number of dataset text samples to process "
+                             "for a faster evaluation. Keeps all statistic formulas unchanged.")
     args = parser.parse_args()
 
     # ── List mode (no GPU needed) ──
@@ -253,7 +258,18 @@ calibration workflow:
         print(f"\nLoading dataset: {ds_name}/{ds_config} ({ds_split}) ...")
 
     test_data = load_dataset(ds_name, ds_config, split=ds_split)
-    raw_text  = "\n\n".join(test_data["text"])
+
+    total_samples = len(test_data["text"])
+    if args.limit_samples is not None:
+        if is_main(rank):
+            print(f"\nLight mode enabled: limiting to first {args.limit_samples} samples out of {total_samples} total samples.")
+        samples = test_data["text"][:args.limit_samples]
+    else:
+        if is_main(rank):
+            print(f"\nProcessing all {total_samples} samples from the dataset.")
+        samples = test_data["text"]
+
+    raw_text  = "\n\n".join(samples)
 
     encodings = tokenizer(raw_text, return_tensors="pt")
     seq_len   = encodings.input_ids.size(1)
@@ -267,10 +283,23 @@ calibration workflow:
 
     # ── 5. Pre-compute & shard windows ───────────────────────────────────────
     all_windows = precompute_windows(seq_len, MAX_LENGTH, STRIDE)
+    
+    # Pad all_windows so length is divisible by world_size to avoid NCCL hangs
+    orig_num_windows = len(all_windows)
+    pad_len = (world_size - (orig_num_windows % world_size)) % world_size
+    if pad_len > 0:
+        # Use the last window as a dummy. We add a boolean flag to all tuples.
+        dummy_window = all_windows[-1]
+        all_windows = [(w[0], w[1], w[2], False) for w in all_windows]
+        for _ in range(pad_len):
+            all_windows.append((dummy_window[0], dummy_window[1], dummy_window[2], True))
+    else:
+        all_windows = [(w[0], w[1], w[2], False) for w in all_windows]
+
     my_windows = all_windows[rank::world_size]
 
     if is_main(rank):
-        print(f"\nTotal windows: {len(all_windows)}  |  Windows per rank: ~{len(my_windows)}")
+        print(f"\nTotal windows: {orig_num_windows} (+{pad_len} padded)  |  Windows per rank: {len(my_windows)}")
         print(f"Computing PPL  (max_length={MAX_LENGTH}, stride={STRIDE}) ...")
 
     barrier()
@@ -283,7 +312,7 @@ calibration workflow:
     t_start = time.perf_counter()
 
     iterator = tqdm(my_windows, desc=f"[rank {rank}] PPL windows", disable=not is_main(rank))
-    for win_idx, (begin_loc, end_loc, trg_len) in enumerate(iterator):
+    for win_idx, (begin_loc, end_loc, trg_len, is_dummy) in enumerate(iterator):
         input_ids  = encodings.input_ids[:, begin_loc:end_loc].to(device)
         target_ids = input_ids.clone()
         target_ids[:, :-trg_len] = -100
@@ -292,9 +321,10 @@ calibration workflow:
             outputs = model(input_ids, labels=target_ids)
             avg_nll = outputs.loss.item()
 
-        local_nll_sum  += avg_nll * trg_len
-        local_tokens   += trg_len
-        local_chunk_nlls.append(avg_nll)
+        if not is_dummy:
+            local_nll_sum  += avg_nll * trg_len
+            local_tokens   += trg_len
+            local_chunk_nlls.append(avg_nll)
 
         # Free tensors and periodically release cached memory to prevent OOM
         del input_ids, target_ids, outputs

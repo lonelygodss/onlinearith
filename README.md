@@ -17,7 +17,7 @@ representation. Implemented as modifications to the Qwen3 model in the HuggingFa
 - `transformers/src/transformers/models/qwen3/msd_perf_stats.py` — Hierarchical inference performance statistics
 
 **Evaluation scripts (multi-GPU via `--nproc` auto-launch or torchrun):**
-- `onlinearith/ppltest.py` — Single-setup PPL evaluation with window-level data parallelism
+- `onlinearith/ppltest.py` — Single-setup PPL evaluation with window-level data parallelism (Supports `--limit-samples N` for light mode fast runs)
 - `onlinearith/ppl_batch.py` — All-setup batch PPL evaluation with setup-level parallelism
 - `onlinearith/dist_utils.py` — Lightweight distributed helpers (NCCL init, all_reduce, barrier)
 - `onlinearith/test_distributed.py` — Verification test for multi-GPU infrastructure
