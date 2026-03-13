@@ -325,6 +325,9 @@ within 32 GB per RTX 5090) and processes its shard of the work.
 cd /home/xzj/coding/onlinearith
 source /home/xzj/coding/.venv3_10/bin/activate
 
+# Light mode for quick testing — truncates dataset to N samples to accelerate testing while preserving valid metric scaling
+python ppltest.py --nproc 8 --setup 6 --limit-samples 20
+
 # Single PPL evaluation — 8 GPUs, ~7-8x speedup
 python ppltest.py --nproc 8 --setup 2
 

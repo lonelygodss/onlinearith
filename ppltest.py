@@ -145,6 +145,9 @@ calibration workflow:
                         help="Transformer layer index for which full per-channel "
                              "MSD performance detail is recorded in the output JSON. "
                              "All other layers only get compact summaries. (default: 2)")
+    parser.add_argument("--limit-samples", type=int, default=None, metavar="N",
+                        help="Light mode: limit the number of dataset samples to read up front, "
+                             "greatly accelerating testing while preserving valid subset metrics.")
     args = parser.parse_args()
 
     # ── List mode (no GPU needed) ──
@@ -253,6 +256,15 @@ calibration workflow:
         print(f"\nLoading dataset: {ds_name}/{ds_config} ({ds_split}) ...")
 
     test_data = load_dataset(ds_name, ds_config, split=ds_split)
+    total_samples = len(test_data)
+    if args.limit_samples is not None:
+        if is_main(rank):
+            print(f"Light mode enabled: limiting to first {args.limit_samples} samples out of {total_samples} total samples.")
+        test_data = test_data.select(range(min(args.limit_samples, total_samples)))
+    else:
+        if is_main(rank):
+            print(f"Processing all {total_samples} samples from the dataset.")
+
     raw_text  = "\n\n".join(test_data["text"])
 
     encodings = tokenizer(raw_text, return_tensors="pt")
@@ -268,6 +280,12 @@ calibration workflow:
     # ── 5. Pre-compute & shard windows ───────────────────────────────────────
     all_windows = precompute_windows(seq_len, MAX_LENGTH, STRIDE)
     my_windows = all_windows[rank::world_size]
+    
+    # Pad iterations to prevent NCCL Watchdog Timeout when len(all_windows) % world_size != 0
+    max_windows = math.ceil(len(all_windows) / world_size)
+    dummy_window = (0, 10, 0)  # (begin_loc, end_loc, trg_len=0) for dummy tasks
+    while len(my_windows) < max_windows:
+        my_windows.append(dummy_window)
 
     if is_main(rank):
         print(f"\nTotal windows: {len(all_windows)}  |  Windows per rank: ~{len(my_windows)}")
@@ -284,17 +302,23 @@ calibration workflow:
 
     iterator = tqdm(my_windows, desc=f"[rank {rank}] PPL windows", disable=not is_main(rank))
     for win_idx, (begin_loc, end_loc, trg_len) in enumerate(iterator):
+        is_dummy = (trg_len == 0)
+        
         input_ids  = encodings.input_ids[:, begin_loc:end_loc].to(device)
         target_ids = input_ids.clone()
-        target_ids[:, :-trg_len] = -100
+        if not is_dummy:
+            target_ids[:, :-trg_len] = -100
+        else:
+            target_ids[:] = -100 # mask all for dummy task
 
         with torch.no_grad():
             outputs = model(input_ids, labels=target_ids)
-            avg_nll = outputs.loss.item()
+            avg_nll = outputs.loss.item() if not is_dummy else 0.0
 
-        local_nll_sum  += avg_nll * trg_len
-        local_tokens   += trg_len
-        local_chunk_nlls.append(avg_nll)
+        if not is_dummy:
+            local_nll_sum  += avg_nll * trg_len
+            local_tokens   += trg_len
+            local_chunk_nlls.append(avg_nll)
 
         # Free tensors and periodically release cached memory to prevent OOM
         del input_ids, target_ids, outputs
