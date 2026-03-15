@@ -1327,3 +1327,18 @@ When `msd_deep_pipeline=true`, precision is tracked through the MLP stages:
 | `perf_viz.py` | MSD inference performance statistics visualization (charts from PPL result JSON) |
 | `ppl_results_*.json` | Saved PPL evaluation results (one per setup) |
 | `ppl_batch_summary.json` | Consolidated batch summary with all metrics |
+
+## Baseline N:M Model Sparsification
+To carry out N:M baseline structured sparsification, we dynamically benchmark masks utilizing offline activation norms and weight magnitudes. The entire process simulates the exact MXFP quantization prior to mask generation and effectively directly modifies model parameters before inference.
+
+Read the detailed mathematical foundation here: [Baseline Sparsify](baseline_sparsify.md).
+
+```bash
+# 1. Run Baseline Sparsity Calibration 
+# Creates baseline boolean masks scaling $N=2$ elements strictly across $M=4$ grouped metrics
+python calibrate_base.py --nproc 4 -n 2 -m 4
+
+# 2. Evaluate Baseline Target Over PPL Batches
+# Computes the generated outputs accurately running entirely via standard MX calculation logic
+python ppl_batch_base.py --nproc 4 -n 2 -m 4
+```
