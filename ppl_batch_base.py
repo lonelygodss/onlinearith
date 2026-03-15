@@ -2,14 +2,14 @@
 Batch PPL evaluation across all MSD / MXFP configuration combinations.
 
 Supports **multi-GPU** — either auto-launched (recommended) or via torchrun:
-    python ppl_batch.py --nproc 8                        # auto-launch 8 GPUs (picks free port)
-    python ppl_batch.py --nproc 4 --only 2 6             # subset on 4 GPUs
-    python ppl_batch.py --nproc 4 --gpus 4,5,6,7         # specific GPUs, free port
-    python ppl_batch.py                                   # single-GPU fallback
+    python ppl_batch_base.py --nproc 8                        # auto-launch 8 GPUs (picks free port)
+    python ppl_batch_base.py --nproc 4 --only 1 2             # subset on 4 GPUs
+    python ppl_batch_base.py --nproc 4 --gpus 4,5,6,7         # specific GPUs, free port
+    python ppl_batch_base.py                                   # single-GPU fallback
 
     # Manual torchrun (you must pick a free port yourself if 29500 is taken):
-    torchrun --nproc_per_node=8 --master-port=29501 ppl_batch.py
-    torchrun --nproc_per_node=3 --master-port=29501 ppl_batch.py --gpus 0,2,5
+    torchrun --nproc_per_node=8 --master-port=29501 ppl_batch_base.py
+    torchrun --nproc_per_node=3 --master-port=29501 ppl_batch_base.py --gpus 0,2,5
 
 Each GPU loads its own model copy and processes a shard of the setups.
 Setups are partitioned round-robin across ranks; each rank writes its
@@ -27,13 +27,13 @@ assign more setups to them.  For now, just assign round-robin and let the user m
 
 Usage:
     cd /home/xzj/coding/onlinearith
-    python ppl_batch.py --nproc 8                             # run all setups
-    python ppl_batch.py --nproc 8 --list                      # list setups (rank 0)
-    python ppl_batch.py --nproc 8 --only 1 6 10               # run only selected
-    python ppl_batch.py --nproc 4 --gpus 4,5,6,7              # specific GPUs
-    python ppl_batch.py --nproc 8 --force                     # re-run even if done
-    python ppl_batch.py                                       # single-GPU fallback
-    python ppl_batch.py --gpus 3                              # single specific GPU
+    python ppl_batch_base.py --nproc 8                             # run all setups
+    python ppl_batch_base.py --nproc 8 --list                      # list setups (rank 0)
+    python ppl_batch_base.py --nproc 8 --only 1 6 10               # run only selected
+    python ppl_batch_base.py --nproc 4 --gpus 4,5,6,7              # specific GPUs
+    python ppl_batch_base.py --nproc 8 --force                     # re-run even if done
+    python ppl_batch_base.py                                       # single-GPU fallback
+    python ppl_batch_base.py --gpus 3                              # single specific GPU
 """
 
 
@@ -47,6 +47,10 @@ SETUPS = [
 import argparse
 import json
 import math
+import os
+import re
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -68,6 +72,8 @@ from dist_utils import (
 from experiment_config import (
     BASELINE_CONFIG, apply_config, reset_to_baseline,
     reconfigure_mlp_layers, get_config_snapshot, get_active_flags,
+    format_config_banner,peak_memory_str,
+    reset_peak_memory,
 )
 
 # Re-export for backward compatibility (calibrate.py, ppltest.py may import these)
@@ -78,6 +84,7 @@ MODEL_PATH  = "../Qwen3-0.6B"
 DATASET     = ("wikitext", "wikitext-2-raw-v1", "test")
 MAX_LENGTH  = 4096
 STRIDE      = 512
+RESULTS_ROOT = Path("../data/calib-data_base")
 RESULTS_DIR = None   # set in main()
 
 
@@ -148,10 +155,85 @@ def evaluate_ppl(model, encodings, device, seq_len, num_words, num_chars, num_by
     }
 
 
+def discover_nm_cases(results_root):
+    """Return sorted [(n, m, path), ...] for subdirs named like 'n-m'."""
+    cases = []
+    if not results_root.exists():
+        return cases
+
+    for child in results_root.iterdir():
+        if not child.is_dir():
+            continue
+        match = re.fullmatch(r"(\d+)-(\d+)", child.name)
+        if not match:
+            continue
+        n, m = int(match.group(1)), int(match.group(2))
+        cases.append((n, m, child))
+
+    cases.sort(key=lambda x: (x[0], x[1]))
+    return cases
+
+
+def run_complete_mode(args):
+    """Run this script serially for every discovered n-m case."""
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if world_size > 1:
+        print("ERROR: --complete must be launched as a single process (not inside torchrun).")
+        print("Run: python ppl_batch_base.py --complete [--nproc N] [--gpus ...]")
+        return 2
+
+    cases = discover_nm_cases(RESULTS_ROOT)
+    if not cases:
+        print(f"No n-m result directories found in {RESULTS_ROOT}.")
+        return 0
+
+    print(f"[complete] Found {len(cases)} n-m cases under {RESULTS_ROOT}")
+    start_all = time.perf_counter()
+
+    script_path = Path(__file__).resolve()
+    script_dir = script_path.parent
+
+    for idx, (n, m, case_dir) in enumerate(cases, start=1):
+        cmd = [
+            sys.executable,
+            str(script_path),
+            "-n", str(n),
+            "-m", str(m),
+        ]
+        if args.nproc is not None:
+            cmd.extend(["--nproc", str(args.nproc)])
+        if args.gpus is not None:
+            cmd.extend(["--gpus", args.gpus])
+        if args.force:
+            cmd.append("--force")
+        if args.only:
+            cmd.extend(["--only", *[str(s) for s in args.only]])
+
+        print()
+        print(f"[complete] ({idx}/{len(cases)}) Running n={n}, m={m} in {case_dir.name}")
+        print(f"[complete] Command: {' '.join(cmd)}")
+        start_case = time.perf_counter()
+
+        completed = subprocess.run(cmd, cwd=str(script_dir))
+        case_elapsed = time.perf_counter() - start_case
+        if completed.returncode != 0:
+            print(f"[complete] FAILED n={n}, m={m} (exit={completed.returncode}, {case_elapsed:.1f}s)")
+            return completed.returncode
+
+        print(f"[complete] DONE n={n}, m={m} ({case_elapsed:.1f}s)")
+
+    all_elapsed = time.perf_counter() - start_all
+    print()
+    print(f"[complete] All cases finished in {all_elapsed/60:.1f} min")
+    return 0
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(description="Batch PPL evaluation for all MXFP/MSD setups")
+    parser.add_argument("--complete", action="store_true",
+                        help="Run all discovered n-m cases serially (one ppl_batch_base run per case).")
     parser.add_argument("--list", action="store_true", help="List all setups and exit")
     parser.add_argument("--only", nargs="+", type=int, metavar="ID",
                         help="Run only these setup IDs (e.g. --only 1 6 10)")
@@ -167,10 +249,17 @@ def main():
                         help="Comma-separated physical GPU IDs to use, e.g. '4,5,6,7'. "
                              "Must match --nproc (or --nproc_per_node if using torchrun).")
     args = parser.parse_args()
+
+    if args.complete:
+        exit_code = run_complete_mode(args)
+        if exit_code != 0:
+            raise SystemExit(exit_code)
+        return
+
     restrict_gpus(args.gpus)
     maybe_relaunch_with_torchrun(args.nproc)
     global RESULTS_DIR
-    RESULTS_DIR = Path(f'./calib-data_base/{args.n}-{args.m}')
+    RESULTS_DIR = RESULTS_ROOT / f"{args.n}-{args.m}"
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
     # ── Distributed init (no NCCL — ranks work independently) ──
@@ -369,7 +458,7 @@ def main():
 
         # ── Save consolidated summary JSON ──
         from datetime import datetime, timezone
-        summary_file = RESULTS_DIR / "ppl_batch_summary.json"
+        summary_file = RESULTS_DIR / "ppl_batch_base_summary.json"
         summary = {
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "model": MODEL_PATH,

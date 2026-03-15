@@ -32,7 +32,7 @@ CAL_SETUPS = [
 ]
 
 MODEL_PATH = "../Qwen3-0.6B"
-CAL_DATASET = ("wikitext", "wikitext-2-raw-v1", "train")
+CAL_DATASET = ("wikitext", "wikitext-2-raw-v1", "validation")
 
 
 def calibrate_baseline_sparsify(model, tokenizer, calibration_texts, n=2, m=4, max_length=512, batch_size=4):
@@ -169,7 +169,7 @@ def main():
 
     my_setups = run_setups[rank::world_size]
 
-    RESULTS_DIR = Path(f"./calib-data_base/{args.n}-{args.m}")
+    RESULTS_DIR = Path(f"../data/calib-data_base/{args.n}-{args.m}")
     if is_main(rank):
         RESULTS_DIR.mkdir(parents=True, exist_ok=True)
         print(f"World size: {world_size}  |  Device: {device}  |  dtype: {dtype}")
@@ -211,7 +211,7 @@ def main():
         # Reconfigure to the specific MXFP format
         reset_to_baseline(model.config)
         cfg_diff = apply_config(model.config, raw_config)
-        reconfigure_mlp_layers(model)
+        reconfigure_mlp_layers(model,device)
 
         t0 = time.perf_counter()
         masks = calibrate_baseline_sparsify(
