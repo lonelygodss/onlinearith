@@ -60,7 +60,7 @@ from experiment_config import (
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 MODEL_PATH  = "../Qwen3-0.6B"
-RESULTS_DIR = Path(__file__).parent
+RESULTS_DIR = "../data"
 CAL_DATASET = ("wikitext", "wikitext-2-raw-v1", "validation")
 
 # ── Calibration setups (one per MXFP format) ─────────────────────────────────
