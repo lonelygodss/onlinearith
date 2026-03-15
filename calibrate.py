@@ -76,6 +76,13 @@ CAL_SETUPS = [
 ]
 
 
+def _snr_to_dir_name(target_snr: float) -> str:
+    # Keep whole-number SNRs compact (e.g., 30db) and preserve decimals otherwise.
+    if float(target_snr).is_integer():
+        return f"{int(target_snr)}db"
+    return f"{target_snr:g}db"
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="MSD budget calibration for MXFP formats (multi-GPU via torchrun)"
@@ -111,6 +118,10 @@ def main():
                              "(gate/up/down) of this layer get channel-wise "
                              "detail; all other layers only get compact summaries.")
     args = parser.parse_args()
+
+    output_dir = RESULTS_DIR / "calib-data" / _snr_to_dir_name(args.target_snr)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
     restrict_gpus(args.gpus)
     maybe_relaunch_with_torchrun(args.nproc)
 
@@ -125,9 +136,10 @@ def main():
             print(f"\n{'ID':>3}  {'Tag':<15}  Description")
             print("-" * 50)
             for sid, tag, desc, _ in CAL_SETUPS:
-                result_file = RESULTS_DIR / f"calibration_{tag}.json"
+                result_file = output_dir / f"calibration_{tag}.json"
                 exists = "  (done)" if result_file.exists() else ""
                 print(f"{sid:3d}  {tag:<15}  {desc}{exists}")
+            print(f"\nOutput dir: {output_dir}")
             print()
         cleanup_distributed()
         return
@@ -210,7 +222,7 @@ def main():
     )
 
     for i, (sid, tag, desc, overrides) in enumerate(setup_iter):
-        result_file = RESULTS_DIR / f"calibration_{tag}.json"
+        result_file = output_dir / f"calibration_{tag}.json"
         print(f"[rank {rank}] {'='*55}")
         print(f"[rank {rank}]   [{i+1}/{len(my_setups)}]  Setup #{sid}: {desc}")
         print(f"[rank {rank}]   Tag: {tag}  ->  {result_file.name}")
@@ -319,7 +331,7 @@ def main():
         print("-" * 60)
 
         for sid, tag, desc, _ in run_setups:
-            result_file = RESULTS_DIR / f"calibration_{tag}.json"
+            result_file = output_dir / f"calibration_{tag}.json"
             if result_file.exists():
                 with open(result_file) as f:
                     res = json.load(f)
@@ -338,7 +350,7 @@ def main():
                 print(f"{sid:3d}  {tag:<15}  {'MISSING':>7}")
 
         print("-" * 60)
-        print(f"\nCalibration files saved in: {RESULTS_DIR}")
+        print(f"\nCalibration files saved in: {output_dir}")
         print(f"To use with PPL tests, copy msd_calibration_data from")
         print(f"calibration_<tag>.json into Qwen3-0.6B/config.json, or")
         print(f"load programmatically with apply_calibration_to_config().")
