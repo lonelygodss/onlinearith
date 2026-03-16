@@ -80,6 +80,8 @@ DATASET     = ("wikitext", "wikitext-2-raw-v1", "test")   # (name, config, split
 MAX_LENGTH  = 4096   # max context window fed to the model
 STRIDE      = 512    # sliding-window stride (<= MAX_LENGTH)
 RESULTS_OUT = "ppl_results_MXFP8_MSD_B16.json"
+RESULTS_ROOT = Path("../data/calib-data")
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -248,7 +250,7 @@ calibration workflow:
     elif selected_setup is not None:
         tag = selected_setup[1]
         calib_suffix = "_calib" if cal_data_dict is not None else ""
-        results_out = f"ppl_results_{tag}{calib_suffix}.json"
+        results_out = RESULTS_ROOT / f"ppl_results_{tag}{calib_suffix}.json"
     else:
         results_out = RESULTS_OUT
 
