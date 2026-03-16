@@ -4,13 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Simulation of a custom Compute-in-Memory (CiM) dot-product hardware unit for LLM inference, using **MSD-first (Most Significant Digit) digit-pipelined arithmetic with BSD (Binary Signed-Digit) representation**. This is the **baseline-sparse** variant of the `onlinearith` project. The simulation is implemented as modifications to the Qwen3 model in HuggingFace Transformers, evaluated via perplexity on WikiText-2.
+Simulation of a custom Compute-in-Memory (CiM) dot-product hardware unit for LLM inference, using **MSD-first (Most Significant Digit) digit-pipelined arithmetic with BSD (Binary Signed-Digit) representation**. The simulation is implemented as modifications to the Qwen3 model in HuggingFace Transformers, evaluated via perplexity on WikiText-2.
 
 Target model: **Qwen3-0.6B** (at `../Qwen3-0.6B/`).
 
 ## Repository Layout
 
-This repo (`onlinearith-baseline-sparse/`) contains evaluation and calibration scripts. The actual model implementation lives in a sibling directory:
+This repo (`onlinearith/`) contains evaluation and calibration scripts. The actual model implementation lives in a sibling directory:
 
 **Modified Transformers source** (at `../transformers-baseline-sparse/src/transformers/models/qwen3/`):
 - `modular_qwen3.py` — Main implementation (edit here; `modeling_qwen3.py` is auto-generated from this)
