@@ -250,7 +250,8 @@ calibration workflow:
     elif selected_setup is not None:
         tag = selected_setup[1]
         calib_suffix = "_calib" if cal_data_dict is not None else ""
-        results_out = RESULTS_ROOT / f"ppl_results_{tag}{calib_suffix}.json"
+        results_dir = cal_path.parent if cal_data_dict is not None else RESULTS_ROOT
+        results_out = results_dir / f"ppl_results_{tag}{calib_suffix}.json"
     else:
         results_out = RESULTS_OUT
 
