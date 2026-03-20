@@ -12,7 +12,7 @@ Target model: **Qwen3-0.6B** (at `../Qwen3-0.6B/`).
 
 This repo (`onlinearith/`) contains evaluation and calibration scripts. The actual model implementation lives in a sibling directory:
 
-**Modified Transformers source** (at `../transformers-baseline-sparse/src/transformers/models/qwen3/`):
+**Modified Transformers source** (at `../transformers/src/transformers/models/qwen3/`):
 - `modular_qwen3.py` — Main implementation (edit here; `modeling_qwen3.py` is auto-generated from this)
 - `configuration_qwen3.py` — Config with MXFP/MSD fields
 - `calibration_msd.py` — Offline budget calibration utility
@@ -35,7 +35,7 @@ This repo (`onlinearith/`) contains evaluation and calibration scripts. The actu
 ## Environment & Running
 
 ```bash
-cd /home/xzj/coding/onlinearith-baseline-sparse
+cd /home/xzj/coding/onlinearith
 source /home/xzj/coding/.venv3_10/bin/activate
 ```
 
