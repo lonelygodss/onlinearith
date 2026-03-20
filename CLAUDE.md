@@ -12,7 +12,7 @@ Target model: **Qwen3-0.6B** (at `../Qwen3-0.6B/`).
 
 This repo (`onlinearith-lite-ppl/`) contains evaluation and calibration scripts. The actual model implementation lives in a sibling directory:
 
-**Modified Transformers source** (at `../transformers-baseline-sparse/src/transformers/models/qwen3/`):
+**Modified Transformers source** (at `../transformers/src/transformers/models/qwen3/`):
 - `modeling_qwen3.py` — Main implementation (edit here; ignore `modular_qwen3.py`)
 - `configuration_qwen3.py` — Config with MXFP/MSD fields
 - `calibration_msd.py` — Offline budget calibration utility
@@ -35,7 +35,7 @@ This repo (`onlinearith-lite-ppl/`) contains evaluation and calibration scripts.
 ## Environment & Running
 
 ```bash
-cd /home/xzj/coding/onlinearith-baseline-sparse
+cd /home/xzj/coding/onlinearith
 source /home/xzj/coding/.venv3_10/bin/activate
 ```
 
@@ -111,7 +111,7 @@ Defined in `experiment_config.py` `SETUPS` list. 21 setups total:
 ## Key Implementation Details
 
 - `experiment_config.py` is the single source of truth for config fields and setup definitions — import from here, don't duplicate
-- `_msd_truncate()` in `modular_qwen3.py` is the core truncation function used at both inference and calibration time
+- `_msd_truncate()` in `modeling_qwen3.py` is the core truncation function used at both inference and calibration time
 - `MSDComputeContext._active` is a class-level singleton, process-safe under torchrun (separate address spaces)
 - Model path: `../Qwen3-0.6B` (relative to this directory)
 - `dist_utils.py` is the shared infrastructure for distributed mode
