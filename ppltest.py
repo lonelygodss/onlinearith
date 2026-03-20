@@ -352,7 +352,7 @@ calibration workflow:
 
         # Free tensors and periodically release cached memory to prevent OOM
         del input_ids, target_ids, outputs
-        if win_idx % 20 == 19:
+        if win_idx % 100 == 99:
             torch.cuda.empty_cache()
 
         # Periodic barrier: prevent cumulative timing drift across ranks from

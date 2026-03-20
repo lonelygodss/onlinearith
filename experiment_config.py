@@ -64,7 +64,7 @@ BASELINE_CONFIG: dict = {
     "msd_deep_pipeline": False,
     "msd_pipeline_precision_loss": 2,
     "msd_calibration_data": None,
-    "msd_chunk_target_mib": 512,
+    "msd_chunk_target_mib": 1536,
 }
 
 

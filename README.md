@@ -133,7 +133,7 @@ All configurations are controlled via `Qwen3-0.6B/config.json`. The table below 
   "use_msd_truncation": true,
   "msd_cycle_budget": 16,
   "msd_online_delay": 2,
-  "msd_budget_dynamic_scale": 1.0,
+  "msd_budget_dynamic_scale": 0.0,
   "msd_budget_dynamic_threshold": 0.0,
   "msd_budget_dynamic_mode": "linear"
 }
@@ -243,7 +243,7 @@ Where:
 - **Linear mode** (default): ΔB = α · max(0, E_combined − E_threshold)
 - **Step mode**: ΔB = α if E_combined > E_threshold, else 0
 
-With the default config (α = 1.0, E_threshold = 0.0), ΔB equals the combined scale exponent, giving extra cycles to high-magnitude channels at runtime. This captures sample-dependent dynamic range that offline calibration cannot predict.
+With the default config (α = 0.0, E_threshold = 0.0), ΔB equals the combined scale exponent, giving extra cycles to high-magnitude channels at runtime. This captures sample-dependent dynamic range that offline calibration cannot predict.
 
 ### How the Tiers Compose
 
@@ -269,7 +269,7 @@ The `_resolve_channel_budgets()` method in `_MXFPLinearBase` implements this com
 | `use_msd_truncation` | bool | false | Master switch for MSD simulation |
 | `msd_cycle_budget` | int | 16 | Global default cycle budget B_base (Tier A) |
 | `msd_online_delay` | int | 2 | MSD multiplier online delay δ (digits before first valid product) |
-| `msd_budget_dynamic_scale` | float | 1.0 | α for Tier C dynamic adjustment |
+| `msd_budget_dynamic_scale` | float | 0.0 | α for Tier C dynamic adjustment |
 | `msd_budget_dynamic_threshold` | float | 0.0 | E_threshold for Tier C dynamic adjustment |
 | `msd_budget_dynamic_mode` | str | "linear" | `"linear"` or `"step"` for Tier C mode |
 | `msd_deep_pipeline` | bool | false | Enable MSD streaming through MLP (gate→silu→×up→down) |
