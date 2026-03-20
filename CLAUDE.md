@@ -13,7 +13,7 @@ Target model: **Qwen3-0.6B** (at `../Qwen3-0.6B/`).
 This repo (`onlinearith-lite-ppl/`) contains evaluation and calibration scripts. The actual model implementation lives in a sibling directory:
 
 **Modified Transformers source** (at `../transformers-baseline-sparse/src/transformers/models/qwen3/`):
-- `modular_qwen3.py` — Main implementation (edit here; `modeling_qwen3.py` is auto-generated from this)
+- `modeling_qwen3.py` — Main implementation (edit here; ignore `modular_qwen3.py`)
 - `configuration_qwen3.py` — Config with MXFP/MSD fields
 - `calibration_msd.py` — Offline budget calibration utility
 - `msd_perf_stats.py` — Hierarchical inference performance statistics
