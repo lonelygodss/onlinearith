@@ -38,7 +38,14 @@ import torch
 from datasets import load_dataset
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from transformers.models.qwen3.calibration_msd import calibrate_channel_budgets
+from transformers.models.qwen3.calibration_msd import (
+    calibrate_channel_budgets,
+    collect_layer_block_cache,
+    solve_min_snr_budgets_from_cache,
+    build_error_curves_from_cache,
+    solve_fixed_sum_from_error_curves,
+    evaluate_budget_vector_from_cache,
+)
 
 from dist_utils import (
     cleanup_distributed,
@@ -60,7 +67,7 @@ from experiment_config import (
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 MODEL_PATH  = "../Qwen3-0.6B"
-RESULTS_DIR = "../data"
+RESULTS_DIR = Path("../data")
 CAL_DATASET = ("wikitext", "wikitext-2-raw-v1", "validation")
 
 # ── Calibration setups (one per MXFP format) ─────────────────────────────────
@@ -117,6 +124,19 @@ def main():
                              "statistics (default: 2). The 3 MLP projections "
                              "(gate/up/down) of this layer get channel-wise "
                              "detail; all other layers only get compact summaries.")
+    # ── Fixed-sum optimizer arguments ──
+    parser.add_argument("--optimizer", type=str, choices=["snr_min", "fixed_sum"],
+                        default="snr_min",
+                        help="Optimization mode: snr_min (existing binary search) or "
+                             "fixed_sum (redistribution from high-gain to low-loss channels)")
+    parser.add_argument("--holdout-fraction", type=float, default=0.0,
+                        help="Fraction of texts to hold out for validation (0.0 = no holdout)")
+    parser.add_argument("--projection-filter", type=str, default=None,
+                        help="Only calibrate matching projections (e.g., 'gate_proj' or 'up_proj,down_proj')")
+    parser.add_argument("--curve-window", type=int, default=3,
+                        help="Budget window for error curve computation (default: 3)")
+    parser.add_argument("--save-curve-detail", action="store_true",
+                        help="Save full error curve data to JSON (large)")
     args = parser.parse_args()
 
     output_dir = RESULTS_DIR / "calib-data" / _snr_to_dir_name(args.target_snr)
@@ -206,10 +226,24 @@ def main():
     ds = load_dataset(ds_name, ds_config, split=ds_split)
     cal_texts = [t for t in ds["text"] if len(t.strip()) > 100][:args.num_texts]
 
+    # Split into train/holdout if requested
+    if args.holdout_fraction > 0:
+        n_holdout = int(len(cal_texts) * args.holdout_fraction)
+        cal_texts_train = cal_texts[:-n_holdout] if n_holdout > 0 else cal_texts
+        cal_texts_holdout = cal_texts[-n_holdout:] if n_holdout > 0 else []
+    else:
+        cal_texts_train = cal_texts
+        cal_texts_holdout = []
+
     if is_main(rank):
-        print(f"Calibration texts: {len(cal_texts)} paragraphs "
+        print(f"Calibration texts: {len(cal_texts_train)} train, {len(cal_texts_holdout)} holdout "
               f"(max_length={args.max_length}, batch_size={args.batch_size})")
         print()
+
+    # Parse projection filter if requested
+    projection_filter = None
+    if args.projection_filter:
+        projection_filter = set(args.projection_filter.split(","))
 
     # ── Run assigned setups ──
     total_start = time.perf_counter()
@@ -226,6 +260,7 @@ def main():
         print(f"[rank {rank}] {'='*55}")
         print(f"[rank {rank}]   [{i+1}/{len(my_setups)}]  Setup #{sid}: {desc}")
         print(f"[rank {rank}]   Tag: {tag}  ->  {result_file.name}")
+        print(f"[rank {rank}]   Optimizer: {args.optimizer}")
         print(f"[rank {rank}] {'='*55}")
 
         # Skip if exists
@@ -243,18 +278,115 @@ def main():
         for line in banner.splitlines():
             print(f"[rank {rank}]   {line}")
 
-        # Run calibration (GPU-accelerated, output-chunked)
+        # Run calibration using either legacy or staged API
         t0 = time.perf_counter()
-        calibration_data, layer_summaries, channel_details = calibrate_channel_budgets(
-            model, tokenizer, cal_texts,
-            target_snr_db=args.target_snr,
-            max_length=args.max_length,
-            batch_size=args.batch_size,
-            online_delay=args.online_delay,
-            show_progress=is_main(rank),
-            progress_prefix=f"[rank {rank}] ",
-            detail_layer=args.detail_layer,
-        )
+
+        if args.optimizer == "snr_min":
+            # Legacy path: use existing calibrate_channel_budgets
+            calibration_data, layer_summaries, channel_details = calibrate_channel_budgets(
+                model, tokenizer, cal_texts_train,
+                target_snr_db=args.target_snr,
+                max_length=args.max_length,
+                batch_size=args.batch_size,
+                online_delay=args.online_delay,
+                show_progress=is_main(rank),
+                progress_prefix=f"[rank {rank}] ",
+                detail_layer=args.detail_layer,
+            )
+            optimizer_stats = {}
+            holdout_eval = {}
+        else:
+            # Staged API path for fixed_sum optimizer
+            # Stage 1: Capture
+            caches = collect_layer_block_cache(
+                model, tokenizer, cal_texts_train,
+                max_length=args.max_length,
+                batch_size=args.batch_size,
+                online_delay=args.online_delay,
+                show_progress=is_main(rank),
+                progress_prefix=f"[rank {rank}] ",
+            )
+
+            # Filter by projection if requested
+            if projection_filter:
+                caches = {
+                    k: v for k, v in caches.items()
+                    if any(proj in k for proj in projection_filter)
+                }
+
+            # Stage 2: Solve per layer
+            calibration_data = {}
+            layer_summaries = {}
+            channel_details = {}
+            optimizer_stats = {}
+            error_curves_detail = {}  # Initialize here
+            error_curves_detail = {}
+
+            detail_prefix = f"model.layers.{args.detail_layer}."
+
+            for layer_name, cache in tqdm(
+                list(caches.items()),
+                desc=f"[rank {rank}] solving layers",
+                disable=not is_main(rank),
+            ):
+                # Solve SNR-min (Stage 2a)
+                budgets_snr_min, layer_summary, channel_detail = solve_min_snr_budgets_from_cache(
+                    cache,
+                    target_snr_db=args.target_snr,
+                    collect_channel_detail=(detail_prefix in layer_name),
+                )
+
+                if args.optimizer == "fixed_sum":
+                    # Build error curves (Stage 2b part 1)
+                    curves = build_error_curves_from_cache(
+                        cache, budgets_snr_min, window=args.curve_window
+                    )
+
+                    # Solve fixed-sum (Stage 2b part 2)
+                    budgets_opt, stats = solve_fixed_sum_from_error_curves(curves)
+
+                    # Convert to tensor for potential evaluation
+                    budgets_final = torch.tensor(
+                        budgets_opt, dtype=torch.float32, device=cache.device
+                    )
+
+                    optimizer_stats[layer_name] = stats
+                    if args.save_curve_detail:
+                        # Only save first 100 channels to keep size manageable
+                        error_curves_detail[layer_name] = {
+                            "budget_values": curves.budget_values.tolist(),
+                            "budget_snr_min": curves.budget_snr_min.tolist(),
+                            "errors": curves.errors[:100].tolist(),
+                        }
+                else:
+                    budgets_final = budgets_snr_min
+
+                calibration_data[layer_name] = budgets_final.cpu().tolist()
+                layer_summaries[layer_name] = layer_summary
+                if channel_detail:
+                    channel_details[layer_name] = channel_detail
+
+            # Stage 3: Evaluate on holdout if provided
+            holdout_eval = {}
+            if cal_texts_holdout and args.holdout_fraction > 0:
+                holdout_caches = collect_layer_block_cache(
+                    model, tokenizer, cal_texts_holdout,
+                    max_length=args.max_length,
+                    batch_size=args.batch_size,
+                    online_delay=args.online_delay,
+                    show_progress=False,
+                )
+                for layer_name, cache in holdout_caches.items():
+                    if layer_name in calibration_data:
+                        budgets = torch.tensor(
+                            calibration_data[layer_name],
+                            dtype=torch.float32,
+                            device=cache.device,
+                        )
+                        holdout_eval[layer_name] = evaluate_budget_vector_from_cache(
+                            cache, budgets
+                        )
+
         elapsed = time.perf_counter() - t0
 
         if not calibration_data:
@@ -278,14 +410,18 @@ def main():
         result = {
             "format": tag,
             "description": desc,
+            "optimizer": args.optimizer,
             "config_overrides": overrides,
             "calibration_params": {
                 "target_snr_db": args.target_snr,
-                "num_texts": len(cal_texts),
+                "num_texts": len(cal_texts_train),
+                "holdout_texts": len(cal_texts_holdout),
+                "holdout_fraction": args.holdout_fraction,
                 "max_length": args.max_length,
                 "batch_size": args.batch_size,
                 "online_delay": args.online_delay,
                 "detail_layer": args.detail_layer,
+                "curve_window": args.curve_window,
             },
             "global_summary": {
                 "num_layers": len(calibration_data),
@@ -300,6 +436,8 @@ def main():
                 "signal_power_db_mean": round(sum(all_sig_power) / len(all_sig_power), 2) if all_sig_power else None,
                 "wall_time_sec": round(elapsed, 2),
             },
+            "optimizer_stats": optimizer_stats if args.optimizer == "fixed_sum" else None,
+            "holdout_evaluation": holdout_eval if holdout_eval else None,
             "layer_stats": layer_summaries,
             "channel_detail": {
                 "detail_layer": args.detail_layer,
@@ -307,6 +445,9 @@ def main():
             },
             "msd_calibration_data": calibration_data,
         }
+
+        if args.save_curve_detail and error_curves_detail:
+            result["error_curves_detail"] = error_curves_detail
 
         with open(result_file, "w") as f:
             json.dump(result, f, indent=2)
