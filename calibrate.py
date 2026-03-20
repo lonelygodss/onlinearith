@@ -256,7 +256,12 @@ def main():
     )
 
     for i, (sid, tag, desc, overrides) in enumerate(setup_iter):
-        result_file = output_dir / f"calibration_{tag}.json"
+        # Add optimizer suffix to filename for fixed_sum mode
+        if args.optimizer == "fixed_sum":
+            result_file = output_dir / f"calibration_{tag}_fixed_sum.json"
+        else:
+            result_file = output_dir / f"calibration_{tag}.json"
+
         print(f"[rank {rank}] {'='*55}")
         print(f"[rank {rank}]   [{i+1}/{len(my_setups)}]  Setup #{sid}: {desc}")
         print(f"[rank {rank}]   Tag: {tag}  ->  {result_file.name}")

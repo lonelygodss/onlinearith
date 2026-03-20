@@ -560,7 +560,38 @@ python calibrate.py --nproc 4 --gpus 4,5,6,7 --force
 python calibrate.py --gpus 3 --setup 1
 ```
 
-Output files are named `calibration_{tag}.json` and saved in `onlinearith/`.
+Output files are named `calibration_{tag}.json` and saved in `../data/calib-data/{snr}db/`.
+
+### Fixed-Sum Budget Redistribution Optimizer
+
+The standard `snr_min` calibration uses binary search to find minimum per-channel budgets meeting a target SNR. The **fixed-sum optimizer** improves on this by redistributing cycles from low-gain channels to high-gain channels while preserving the total hardware cycle budget, reducing total calibration error without increasing cycles.
+
+```bash
+# Standard SNR-min calibration (baseline)
+python calibrate.py --setup 1
+
+# Fixed-sum redistribution
+python calibrate.py --setup 1 --optimizer fixed_sum
+
+# Multi-GPU batch mode (all 4 formats)
+python calibrate.py --nproc 4 --optimizer fixed_sum
+
+# With holdout validation (20% held out)
+python calibrate.py --setup 1 --optimizer fixed_sum --holdout-fraction 0.2
+
+# Only calibrate gate_proj layers
+python calibrate.py --setup 1 --optimizer fixed_sum --projection-filter gate_proj
+```
+
+**Output files:**
+- SNR-min mode: `calibration_{tag}.json` (e.g., `calibration_MXFP8.json`)
+- Fixed-sum mode: `calibration_{tag}_fixed_sum.json` (e.g., `calibration_MXFP8_fixed_sum.json`)
+
+**Key differences:**
+- SNR-min: Each channel independently achieves target SNR with minimum cycles
+- Fixed-sum: Redistributes cycles to minimize total error while preserving sum(B)
+
+See [fixed_sum_calibration.md](fixed_sum_calibration.md) for detailed algorithm explanation, validation gates, and expected results.
 
 ### Parallelism Strategy
 
@@ -582,6 +613,10 @@ Uses `init_distributed_lite()` — no NCCL, ranks work independently.
 | `--batch-size` | 4 | Batch size for calibration forward passes |
 | `--online-delay` | 2 | MSD online delay δ (should match inference config) |
 | `--detail-layer` | 2 | Transformer layer index for full per-channel statistics. The 3 MLP projections (gate/up/down) of this layer get channel-wise detail; all others get compact summaries only. |
+| `--optimizer` | `snr_min` | Optimization mode: `snr_min` (binary search) or `fixed_sum` (redistribution) |
+| `--holdout-fraction` | 0.0 | Fraction of texts to hold out for validation (0.0 = no holdout) |
+| `--projection-filter` | None | Only calibrate matching projections (e.g., `gate_proj` or `up_proj,down_proj`) |
+| `--curve-window` | 3 | Budget window for error curve computation (fixed_sum only) |
 
 ### Expected Runtime
 
@@ -601,6 +636,10 @@ python ppltest.py --nproc 8 --setup 6 --calibration calibration_MXFP8.json
 
 # Output: ppl_results_MXFP8_MSD_B16_calib.json
 # The _calib suffix is added automatically when --calibration is used
+
+# With fixed-sum calibration:
+python calibrate.py --setup 1 --optimizer fixed_sum
+python ppltest.py --nproc 8 --setup 6 --calibration calibration_MXFP8_fixed_sum.json
 ```
 
 `--calibration` loads the `msd_calibration_data` from the specified JSON file and overrides the setup's uniform budget with per-channel Tier B budgets (see Section 3). The calibration data is automatically cleared from config after the run.
