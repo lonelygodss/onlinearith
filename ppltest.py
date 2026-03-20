@@ -116,6 +116,7 @@ examples:
   python ppltest.py --nproc 4 --gpus 4,5,6,7 --setup 6    # specific GPUs
   python ppltest.py --setup 6 --limit-samples 20          # light mode: fast run
   python ppltest.py --setup 6 --calibration calibration_MXFP8.json
+  python ppltest.py --setup 6 --calibration calibration_MXFP8.json --lite  # fast stats
 
 calibration workflow:
   1. python calibrate.py --setup 1          # produce calibration_MXFP8.json
@@ -152,6 +153,11 @@ calibration workflow:
     parser.add_argument("--limit-samples", type=int, default=None, metavar="N",
                         help="Light mode: limit the number of dataset text samples to process "
                              "for a faster evaluation. Keeps all statistic formulas unchanged.")
+    parser.add_argument("--lite", action="store_true",
+                        help="Lite stats mode: collect only utilization, zero-block%%, "
+                             "mean p_eff, and max latency per layer.  Skips expensive "
+                             "NAF-width computation and detailed histograms for faster "
+                             "MSD inference.  PPL results are identical to full mode.")
     args = parser.parse_args()
 
     # ── List mode (no GPU needed) ──
@@ -244,13 +250,28 @@ calibration workflow:
             n_channels = sum(len(v) for v in cal_data_dict.values())
             print(f"Calibration loaded: {args.calibration} ({n_layers} layers, {n_channels} channels)")
 
+    # ── 3c. Configure lite stats mode (if --lite given) ─────────────────────────
+    if args.lite:
+        model.config.msd_perf_stats_lite = True
+        if is_main(rank):
+            print("Lite stats mode: skipping NAF-width & histograms for faster inference.")
+    # Disable stats entirely on non-rank-0 processes (saves compute & memory;
+    # rank 0's window sample is representative for aggregate stats).
+    if not is_main(rank):
+        model.config.msd_perf_stats_enabled = False
+    # Invalidate cached MSD context so it picks up the new flags
+    if (args.lite or not is_main(rank)) and hasattr(model, "_msd_context"):
+        model._msd_context = None
+        model._msd_context_config_hash = None
+
     # Determine output filename
     if args.output:
         results_out = args.output
     elif selected_setup is not None:
         tag = selected_setup[1]
         calib_suffix = "_calib" if cal_data_dict is not None else ""
-        results_out = RESULTS_ROOT / f"ppl_results_{tag}{calib_suffix}.json"
+        results_dir = cal_path.parent if cal_data_dict is not None else RESULTS_ROOT
+        results_out = results_dir / f"ppl_results_{tag}{calib_suffix}.json"
     else:
         results_out = RESULTS_OUT
 
@@ -310,6 +331,7 @@ calibration workflow:
     local_nll_sum  = 0.0
     local_tokens   = 0
     local_chunk_nlls = []
+    SYNC_EVERY = 10   # barrier every N windows to cap cumulative rank drift
 
     t_start = time.perf_counter()
 
@@ -332,6 +354,13 @@ calibration workflow:
         del input_ids, target_ids, outputs
         if win_idx % 20 == 19:
             torch.cuda.empty_cache()
+
+        # Periodic barrier: prevent cumulative timing drift across ranks from
+        # exceeding the NCCL timeout.  Without this, small per-window timing
+        # differences accumulate over hundreds of windows (29+ hours), causing
+        # faster ranks to reach the final all_reduce >10 min before slower ones.
+        if world_size > 1 and (win_idx + 1) % SYNC_EVERY == 0:
+            barrier()
 
     elapsed = time.perf_counter() - t_start
 
@@ -421,45 +450,75 @@ calibration workflow:
         if msd_perf is not None:
             results["msd_perf_stats"] = msd_perf
             g = msd_perf.get("global", {})
-            print(f"\n{'MSD PERFORMANCE STATISTICS':^52}")
-            print(SEP)
-            print(f"  Layers profiled  : {g.get('num_layers', 0)}")
-            print(f"  MAC sparsity     : {g.get('mac_sparsity', 0):.4%}")
-            print(f"  Active MACs      : {g.get('active_macs', 0):,} / {g.get('total_macs', 0):,}")
-            print(f"  Mean eff. prec.  : {g.get('mean_effective_precision', 0):.2f} digits")
-            print(f"  Active eff. prec.: {g.get('active_p_eff_mean', 0):.2f} digits")
-            print(f"  Global util.     : {g.get('global_utilization', 0):.4%}")
-            print(f"  Zero blocks      : {g.get('zero_block_ratio', 0):.4%}")
-            print(f"  Partial blocks   : {g.get('partial_block_ratio', 0):.4%}")
-            print(f"  Full blocks      : {g.get('full_block_ratio', 0):.4%}")
-            print(f"  Max budget (lat) : {g.get('max_budget', 0):.1f} cycles")
-            print(f"  Max total delay  : {g.get('max_total_delay', 0):.1f} cycles")
-            print(SEP)
-
-            # ── Per-layer summary table ──
             pl = msd_perf.get("per_layer", {})
-            if pl:
-                HDR = f"  {'Layer':<40s}  p_eff  util%  mac_sp%  zero_blk%  max_B"
-                print(f"\n  Per-layer summary (detail_layer={args.detail_layer}):")
-                print(HDR)
-                print(f"  {'-'*80}")
-                for lname, ldata in pl.items():
-                    s = ldata.get("summary", {})
-                    bl = s.get("bit_level", {})
-                    cl = s.get("channel_level", {})
-                    ml = s.get("mac_level", {})
-                    bkl = s.get("block_level", {})
-                    # Truncate long layer names
-                    short = lname if len(lname) <= 40 else lname[:18] + ".." + lname[-18:]
-                    p_eff_v = bl.get("p_eff_mean", 0)
-                    util_v = cl.get("utilization_mean", 0) * 100
-                    mac_sp_v = ml.get("mac_sparsity", 0) * 100
-                    zblk_v = bkl.get("zero_block_ratio", 0) * 100
-                    max_b_v = cl.get("max_budget", 0)
-                    detail_tag = " *" if "channel_detail" in ldata else ""
-                    print(f"  {short:<40s}  {p_eff_v:5.1f}  {util_v:5.1f}  {mac_sp_v:6.2f}   {zblk_v:6.2f}  {max_b_v:5.1f}{detail_tag}")
-                print(f"  (* = channel detail in JSON for --detail-layer={args.detail_layer})")
-            print(SEP)
+            is_lite = args.lite
+
+            if is_lite:
+                # ── Lite mode output ──
+                print(f"\n{'MSD PERFORMANCE STATISTICS (LITE)':^52}")
+                print(SEP)
+                print(f"  Layers profiled  : {g.get('num_layers', 0)}")
+                print(f"  MAC sparsity     : {g.get('mac_sparsity', 0):.4%}")
+                print(f"  Mean eff. prec.  : {g.get('mean_effective_precision', 0):.2f} digits")
+                print(f"  Global util.     : {g.get('global_utilization', 0):.4%}")
+                print(f"  HW lat. overhead : {g.get('hw_latency_overhead', 0):.4%}")
+                print(f"  Zero blocks      : {g.get('zero_block_ratio', 0):.4%}")
+                print(f"  Max budget       : {g.get('max_budget', 0):.1f} cycles")
+                print(f"  Max total delay  : {g.get('max_total_delay', 0):.1f} cycles")
+                print(SEP)
+
+                if pl:
+                    HDR = f"  {'Layer':<40s}  p_eff  util%  hw_lat%  zero_blk%  avg_B"
+                    print(f"\n  Per-layer summary (lite):")
+                    print(HDR)
+                    print(f"  {'-'*80}")
+                    for lname, ldata in pl.items():
+                        short = lname if len(lname) <= 40 else lname[:18] + ".." + lname[-18:]
+                        p_eff_v = ldata.get("p_eff_mean", 0)
+                        util_v = ldata.get("utilization", 0) * 100
+                        hw_v = ldata.get("hw_latency_overhead", 0) * 100
+                        zblk_v = ldata.get("zero_block_ratio", 0) * 100
+                        avg_b_v = ldata.get("avg_max_latency", 0)
+                        print(f"  {short:<40s}  {p_eff_v:5.1f}  {util_v:5.1f}  {hw_v:6.2f}   {zblk_v:6.2f}  {avg_b_v:5.1f}")
+                print(SEP)
+            else:
+                # ── Full mode output ──
+                print(f"\n{'MSD PERFORMANCE STATISTICS':^52}")
+                print(SEP)
+                print(f"  Layers profiled  : {g.get('num_layers', 0)}")
+                print(f"  MAC sparsity     : {g.get('mac_sparsity', 0):.4%}")
+                print(f"  Active MACs      : {g.get('active_macs', 0):,} / {g.get('total_macs', 0):,}")
+                print(f"  Mean eff. prec.  : {g.get('mean_effective_precision', 0):.2f} digits")
+                print(f"  Active eff. prec.: {g.get('active_p_eff_mean', 0):.2f} digits")
+                print(f"  Global util.     : {g.get('global_utilization', 0):.4%}")
+                print(f"  Zero blocks      : {g.get('zero_block_ratio', 0):.4%}")
+                print(f"  Partial blocks   : {g.get('partial_block_ratio', 0):.4%}")
+                print(f"  Full blocks      : {g.get('full_block_ratio', 0):.4%}")
+                print(f"  Max budget (lat) : {g.get('max_budget', 0):.1f} cycles")
+                print(f"  Max total delay  : {g.get('max_total_delay', 0):.1f} cycles")
+                print(SEP)
+
+                if pl:
+                    HDR = f"  {'Layer':<40s}  p_eff  util%  mac_sp%  zero_blk%  max_B"
+                    print(f"\n  Per-layer summary (detail_layer={args.detail_layer}):")
+                    print(HDR)
+                    print(f"  {'-'*80}")
+                    for lname, ldata in pl.items():
+                        s = ldata.get("summary", {})
+                        bl = s.get("bit_level", {})
+                        cl = s.get("channel_level", {})
+                        ml = s.get("mac_level", {})
+                        bkl = s.get("block_level", {})
+                        short = lname if len(lname) <= 40 else lname[:18] + ".." + lname[-18:]
+                        p_eff_v = bl.get("p_eff_mean", 0)
+                        util_v = cl.get("utilization_mean", 0) * 100
+                        mac_sp_v = ml.get("mac_sparsity", 0) * 100
+                        zblk_v = bkl.get("zero_block_ratio", 0) * 100
+                        max_b_v = cl.get("max_budget", 0)
+                        detail_tag = " *" if "channel_detail" in ldata else ""
+                        print(f"  {short:<40s}  {p_eff_v:5.1f}  {util_v:5.1f}  {mac_sp_v:6.2f}   {zblk_v:6.2f}  {max_b_v:5.1f}{detail_tag}")
+                    print(f"  (* = channel detail in JSON for --detail-layer={args.detail_layer})")
+                print(SEP)
 
         out_path = Path(__file__).parent / results_out
         with open(out_path, "w") as f:

@@ -30,6 +30,7 @@ import socket
 import sys
 import time
 import warnings
+from datetime import timedelta
 from pathlib import Path
 
 import torch
@@ -170,9 +171,15 @@ def maybe_relaunch_with_torchrun(nproc: int | None, extra_env: dict | None = Non
     # execvp replaces the process — never returns
 
 
-def init_distributed():
+def init_distributed(timeout_minutes: int = 120):
     """
     Initialise torch.distributed from torchrun env vars.
+
+    Args:
+        timeout_minutes: NCCL timeout in minutes.  Default is 120 (2 hours)
+            to accommodate long PPL evaluations where cumulative per-window
+            timing differences across ranks can exceed PyTorch's default
+            10-minute timeout.
 
     Returns:
         (rank, world_size, local_rank, device)
@@ -192,7 +199,10 @@ def init_distributed():
                 f"of GPU IDs provided."
             )
         torch.cuda.set_device(local_rank)
-        dist.init_process_group(backend="nccl")
+        dist.init_process_group(
+            backend="nccl",
+            timeout=timedelta(minutes=timeout_minutes),
+        )
         device = torch.device(f"cuda:{local_rank}")
         return rank, world_size, local_rank, device
 
