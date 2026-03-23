@@ -180,23 +180,3 @@ Compare against `calibration_MXFP8.json`. Accept if:
 - **Stage 2c (redistribution)**: O(k log n) where k = swaps, n = channels (~100 ms)
 
 Total overhead: ~2-3x SNR-min runtime for curve building.
-
-## Limitations
-
-- **Scope**: Currently optimizes each projection independently (gate_proj, up_proj, down_proj)
-- **Dynamic budgeting**: Fixed at 0.0 (no runtime adjustment)
-- **Deep pipeline**: Not supported (deprecated feature)
-- **Curve window**: Limited to ±3 cycles by default (trade-off: accuracy vs. memory)
-
-## Future Extensions
-
-1. **Joint optimization**: Redistribute across gate_proj + up_proj by shared intermediate channel index
-2. **Multi-layer optimization**: Redistribute across transformer layers
-3. **Dynamic-aware curves**: Build curves with dynamic budgeting enabled
-4. **Adaptive window**: Wider window for high-variance channels
-
-## References
-
-- Plan document: `/home/xzj/.claude/plans/composed-forging-trinket.md`
-- Unit tests: `test_fixed_sum_optimizer.py`
-- CLAUDE.md: Project overview and architecture
