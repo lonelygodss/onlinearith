@@ -1,439 +1,356 @@
-The hardware design should now be written as **two orthogonal contribution lines**, not one merged mechanism:
+# Revised hardware design plan
 
-1. **FFN-deep micro-tile dataflow**: `gate_proj` / `up_proj` producers, `SiLU` + gating, a **pipelined scatter / reduce-scatter boundary**, and local `down_proj` consumers.
-2. **Checkpoint-based early termination (ET)**: calibrated static per-lane / per-output counters that stop digit work at projection checkpoints.
+## 0. Hardware objective
 
-The first line explains **transport, overlap, and scaling**. The second explains **how much digit work is executed**. They meet at the lane interfaces, but neither should be described as a consequence of the other.
+The hardware writeup should now be organized around one CIM-oriented FFN macro, but with two clearly separated contribution lines:
 
-The micro Tile detail draft:
-# 1. Concrete micro-tile architecture
+1. **FFN-deep producer-consumer dataflow with pipelined scatter / reduce-scatter.**
+   This line explains transport, overlap, locality, scale-up, and why the FFN should be treated as one continuous pipeline instead of isolated operators.
+2. **Checkpoint-based early termination (ET) with calibrated static budgets.**
+   This line explains how much digit work is executed and why the runtime control path is cheap.
 
----
+These two lines meet at the lane interfaces, but neither should be described as a consequence of the other. Scatter is not caused by ET. ET is not justified by scatter. Scatter exploits staggered completion. ET determines where stagger comes from and how much work remains.
 
-## 1.1 Tile definition
+A second important update is that the simulator now tracks the **exact BSD stream** across the FFN. The hardware document should therefore describe internal interfaces explicitly as BSD-stream interfaces, not as a float carrier plus timing metadata. Timing summaries such as `t_first` or ready cycle are still useful control and trace signals, but the primary execution object is the exact digit stream.
 
-I would define the micro-tile as:
+## 1. Detailed design unit and tiling
 
-> A **\(P \times H\)** FFN tile:
-> - \(P\) **owner lanes** for intermediate channels \(i\)
-> - \(H\) **owned consumer outputs** for local `down_proj` outputs \(h\)
+The detailed design unit remains a **32-channel FFN streamline macro**. Inside that macro, use a representative micro-tile of:
 
-A good illustrative point is something like:
+- `P` owner lanes for intermediate channels `i`
+- `H` owned consumer outputs for local `down_proj` channels `h`
+- MX block size `B = 32`
 
-- \(P = 8\) or \(16\)
-- \(H = 16\) or \(32\)
-- MX block size \(B = 32\)
+Recommended illustrative points:
 
-You do **not** need to claim these are final.
-Just say they are **representative tiling parameters**.
+- `P = 8` or `16`
+- `H = 16` or `32`
 
-The important clarification in this version is that the tile owns a **local `down_proj` output shard**. The stage-1 owner lanes therefore do not feed a monolithic global consumer directly; they first cross a **pipeline scatter / reduce-scatter boundary** so that each `down_proj` shard can keep its own local addition tree.
+These values should be presented as representative tiling parameters, not final commitments.
 
----
+The key ownership statement is now:
 
-## 1.2 What the micro-tile contains
+> A micro-tile owns both a stage-1 owner domain over intermediate channels and a local stage-2 output shard over `down_proj` outputs.
 
-I would now break it into 6 blocks.
+This ownership model is what makes the scatter boundary meaningful: stage-1 owner lanes do not drain into a monolithic global consumer. They forward ready BSD streams into the destination `down_proj` shard that owns those outputs, so the reduction tree stays local after the boundary.
 
-### Block 1 — FFN entry / input preparation
-This is where you pay the online-arithmetic interface cost once.
+## 2. Data representation and stream interfaces
+
+Because the simulator now tracks exact BSD behavior, the hardware plan should use stream language consistently.
+
+### 2.1 Internal stream convention
+
+Each in-flight FFN stream should be described as an exact BSD digit stream with local control tags, for example:
+
+`stream = {bsd_digit[t], valid[t], src_i, dst_shard, eos}`
+
+You do not need to hard-commit the packet format in the paper, but figures and text should make the following clear:
+
+- `gate_proj` produces a BSD stream `g_i[t]`
+- `up_proj` produces a BSD stream `u_i[t]`
+- `SiLU(g_i)` remains in the BSD-domain pipeline after the PWL block
+- the gating multiply produces an exact BSD intermediate stream `m_i[t]`
+- the scatter boundary forwards that exact stream to the destination `down_proj` shard
+- stage-2 consumes the actual arriving BSD stream rather than a reconstructed dense value
+
+### 2.2 Timing metadata is still useful, but secondary
+
+The writeup can still use derived control or trace summaries such as:
+
+- `t_first`
+- per-lane ready cycle
+- end-of-stream cycle
+- route or shard ID
+
+But these should be described as **control and measurement fields derived from the exact stream**, not as a replacement for the stream itself. This is the main wording change relative to the previous simulator description.
+
+## 3. Concrete micro-tile architecture
+
+The micro-tile should be drawn and described as six blocks.
+
+### Block 1: FFN entry / input preparation
+
+This is where the format-conversion cost is paid once.
 
 Contains:
-- MX block exponent extractor
+
+- MX block exponent extraction
 - mantissa recoder / BSD recoder
 - digit broadcaster
 - activation block metadata register
 
-**Important message on the figure:**
+Message to put directly on the figure:
+
 > Conversion happens only at FFN entry and FFN exit, not between internal FFN stages.
 
-That directly supports one of your core advantages.
+This remains one of the strongest hardware motivations for the FFN-spanning pipeline.
 
----
+### Block 2: Stage-1 producer lanes
 
-### Block 2 — Stage-1 producer lanes
-For each intermediate channel \(i \in [0, P-1]\), the lane contains:
+For each owner lane `i in [0, P-1]`, include:
 
 - local `gate_proj` weight bank
 - local `up_proj` weight bank
-- two producer MAC paths:
-  - `Gate MAC`
-  - `Up MAC`
-- `t_first` / first-valid-cycle generator for each path
+- `Gate MAC` producer path
+- `Up MAC` producer path
 - local stage-1 ET counter loaded from calibrated budget `B1[i]`
+- ready / first-valid generation for local scheduling and trace extraction
 
-This is where the **shared owner domain** should be visually emphasized.
+The shared owner-domain indexing by intermediate channel should be visually explicit.
 
-The important correction for this iteration is that stage-1 ET is now **static and calibrated**, not dynamic:
+Most important discipline point for this version:
+
+- stage-1 ET is **static and calibrated**
 - no runtime budget delta
-- no combined-scale LUT in the datapath
-- no saturating add on the critical control path
+- no combined-scale LUT in the runtime datapath
+- no saturating add on the control critical path
 
----
+### Block 3: Nonlinearity, time alignment, and gating multiply
 
-### Block 3 — Nonlinearity + align + gating multiply
-Per owner lane:
+Per owner lane, include:
 
-- `PWL SiLU` on the gate path
-- `time-domain align buffer` between `SiLU(g)` and `u`
-- gating multiply `SiLU(g) × u`
-- output stream register with carried timing tag
+- PWL SiLU block on the gate path
+- align buffer between `SiLU(g_i)` and `u_i`
+- gating multiply `SiLU(g_i) * u_i`
+- output stream register for the gated BSD stream `m_i[t]`
 
-This block is where your **deep pipeline** becomes visible and distinct from prior “standalone dot-product” online arithmetic.
+This block is where the deep pipeline becomes tangible. It should be described as a streaming FFN stage, not as a post-processing box after two independent dot products.
 
-Also state explicitly:
-> Calibrated truncation makes different owner lanes finish at different cycles, and that stagger is exactly what the downstream pipeline scatter exploits.
+Important sentence to keep in the text:
 
----
+> Calibrated truncation causes different owner lanes to finish at different cycles, and the scatter boundary exploits that stagger instead of restoring a barrier.
 
-### Block 4 — Pipeline scatter / reduce-scatter boundary
-This is the new block that should sit **between the gated intermediate stream and the local `down_proj` consumer bank**.
+### Block 4: Pipelined scatter / reduce-scatter boundary
+
+This block must sit explicitly between the gated intermediate stream and the local `down_proj` consumer bank.
 
 Contains:
-- owner-stream packetization or tagging (`src_i`, `t_first`, valid)
+
+- stream packetization or tagging (`src_i`, `dst_shard`, valid, eos)
 - route selection for the destination `down_proj` shard
-- per-destination elastic FIFOs / credits
-- issue control that can launch a stream as soon as its owner lane becomes ready
+- per-destination elastic FIFOs or credits
+- issue control that launches a stream as soon as its owner lane is ready
 
-This block is where the deep-pipeline story connects to the tile/scaling story.
+Key text for the body:
 
-The key message is:
-> The intermediate output of gating is not held until the whole stage-1 slice completes. It is scatter-issued as soon as each owner lane finishes, so communication overlaps with late-arriving owner lanes and the destination `down_proj` shard can keep a local addition tree.
+> The gated intermediate stream is not held until the whole stage-1 slice completes. Each owner lane scatter-issues its ready BSD stream immediately, so communication overlaps with late producer lanes and the destination `down_proj` shard can begin local reduction early.
 
-If you want one sentence for the text:
-> The slice boundary behaves like a **pipeline reduce-scatter interface**: stage-1 owner lanes emit gated intermediate streams, and each stream is forwarded to the `down_proj` shard that owns the corresponding output channels.
+This boundary is where the latency story and the scale-up story connect.
 
----
+### Block 5: Stage-2 local consumer bank
 
-### Block 5 — Stage-2 local consumer bank
-This should be a local `down_proj` consumer array for \(H\) owned output channels.
+This block is a local `down_proj` consumer array for `H` owned output channels.
 
 Contains:
+
 - local `down_proj` weight bank
 - ingress FIFOs from the scatter boundary
 - digit-serial consumer multipliers
-- local addition tree / output accumulators for \(y_h\)
-- optional stage-2 ET counter bank loaded from calibrated budget `B2[h]`
-- local output register / FFN exit encoder
+- local addition tree / output accumulators for `y_h`
+- optional stage-2 ET counter bank loaded from `B2[h]`
+- local output register and FFN exit encoder
 
-This block must be visually different from stage-1:
-- stage-1 **produces** timed streams
+The visual distinction should be explicit:
+
+- stage-1 **produces** exact timed BSD streams
 - the scatter boundary **transports and overlaps** them
 - stage-2 **consumes and reduces locally** inside the owned output shard
 
-That supports both your “consumer mode” claim and your scale-up claim.
+### Block 6: Local control and metadata SRAM
 
----
-
-### Block 6 — Local control / metadata SRAM
-A small top or side band showing:
+Add a small side band that makes the hardware feel concrete:
 
 - `B1[i]` SRAM for stage-1 calibrated budgets
 - `B2[h]` SRAM for stage-2 calibrated budgets
 - weight exponent SRAM
-- `t_first` metadata registers
-- scatter route / shard-ID metadata
-- coefficient ROM for SiLU
-
-**Do not** show the old dynamic-budget LUT here.
-
-This makes the design feel real rather than purely algorithmic, while staying consistent with the simplified ET story.
-
----
-
-# 2. A concrete block diagram you can draw
-
-Below is the structure I would actually use.
-
----
-
-## Figure A: FFN micro-tile overview
-
-```text
-┌──────────────────────────── FFN MSD-First Online-Arithmetic Micro-Tile ────────────────────────────┐
-│ Tile dimensions: P owner lanes (intermediate channels i) × H owned down_proj outputs (local h)    │
-│                                                                                                     │
-│  FFN Entry / Prepare                                                                                │
-│  ┌───────────────────────────────────────────────────────────────────────────────────────────────┐  │
-│  │ MX decode / exponent extract / BSD recoder / digit broadcaster                                 │  │
-│  │ Inputs: x_mantissa_blk, e_x_blk                                                                 │  │
-│  │ Outputs: digit stream d_x[t], activation metadata                                               │  │
-│  └───────────────────────────────────────────────────────────────────────────────────────────────┘  │
-│                                      │                                                              │
-│                                      ▼                                                              │
-│                                                                                                     │
-│  ┌──────────────────────────── Shared Stage-1 Owner Domain (indexed by i) ──────────────────────┐ │
-│  │ Owner lane i: gate weight SRAM / up weight SRAM / B1[i] SRAM / local ET counter              │ │
-│  │                                                                                               │ │
-│  │   d_x[t] ──► Gate MAC ──► PWL SiLU ──┐                                                        │ │
-│  │                 │ t_g                │                                                        │ │
-│  │                 │                    ▼                                                        │ │
-│  │                 └──────► Up MAC ──► Align / elastic buffer + × Mul                            │ │
-│  │                           t_u                    │                                             │ │
-│  │                                                  ▼                                             │ │
-│  │                                       owner stream {m_i, t_m, src_i}                           │ │
-│  │                                                  │                                             │ │
-│  │                                           owner output FIFO                                    │ │
-│  └──────────────────────────────────────────────────┼──────────────────────────────────────────────┘ │
-│                                                     ▼                                                │
-│                                                                                                     │
-│  ┌──────────────────────────── Pipeline Scatter / Reduce-Scatter Boundary ───────────────────────┐ │
-│  │ packetize {src_i, m_i, t_m}; route by owned down_proj shard; per-destination elastic FIFOs    │ │
-│  │ issue immediately when each owner lane becomes ready; no wait-for-all-owner barrier            │ │
-│  └──────────────────────────────────────────────────┼──────────────────────────────────────────────┘ │
-│                                                     ▼ ingress streams for this local h-shard        │
-│                                                                                                     │
-│  ┌──────────────────────────── Local Stage-2 Consumer Bank (owned h outputs) ───────────────────┐ │
-│  │ down_proj weight SRAM / B2[h] SRAM / ingress FIFOs / consumer MAC array / local adder tree    │ │
-│  │                                                                                               │ │
-│  │ incoming owner streams ──► digit-serial consumer multipliers ──► H accumulators for y_h       │ │
-│  │ start from carried arrival time; local reduction remains inside the shard                      │ │
-│  └──────────────────────────────────────────────────┼──────────────────────────────────────────────┘ │
-│                                                     ▼                                                │
-│  ┌──────────────────────────────── FFN Exit / Encode ────────────────────────────────────────────┐ │
-│  │ final accumulator / output register / optional reconversion                                   │ │
-│  └───────────────────────────────────────────────────────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────────────────────────────────────────────────────────┘
-```
-
-The important visual correction relative to the previous draft is that the **scatter boundary is explicit**. That keeps the hardware summary aligned with the intended scale-up story.
-
-The early termination detailed draft:
+- route / shard-ID metadata
+- small ready-time or trace registers
+- SiLU coefficient ROM
 
-# 3. Concrete ET figure design
+Do **not** show the old dynamic-budget LUT in this version.
 
-Now the ET figure should reflect the simplified control path.
+## 4. Early termination controller plan
 
----
+The ET figure should now communicate four things very clearly:
 
-## 3.1 Key message of ET figure
+1. The decision is local.
+2. The logic is cheap.
+3. Real activity is gated, not only final writeback.
+4. Runtime ET is static, with budgets preloaded from SRAM.
 
-The figure must make four things obvious:
-
-1. **ET decision is local**
-2. **ET logic is cheap**
-3. **ET gates real activity**
-   - weight read
-   - digit MAC
-   - nonlinearity / multiply toggle
-   - scatter FIFO write
-   - local accumulator toggle
-   not just output masking
-4. **ET is now static at runtime**
-   - calibrated budgets are preloaded from SRAM
-   - no dynamic budget LUT in this iteration
-
-That last point is a major simplification and should be stated directly.
-
----
-
-## 3.2 Recommended ET datapath
-
-I would now make the stage-1 ET controller look like this:
-
----
+### 4.1 Stage-1 ET datapath
 
-## Figure B(a): Per-owner ET controller
+Use a short per-owner controller:
 
-```text
-                         Per-owner ET controller for stage-1 lane i
+- `start_of_stream` loads `B1[i]` from SRAM into a down-counter
+- each issued BSD digit decrements the counter
+- when the counter expires, the lane locally gates:
+  - weight SRAM reads
+  - `gate_proj` and `up_proj` MAC toggles
+  - SiLU / align / multiply toggles
+  - scatter FIFO writes
+  - lane-active state
 
-                               start_of_stream
-                                     │
-                           calibrated B1[i] SRAM
-                                     │
-                                     ▼
-                              load down-counter
-                                     │
-                     digit_issue_valid│
-                                     ▼
-                              ┌────────────┐
-                              │  cnt_i--   │
-                              │ done = 0 ? │
-                              └─────┬──────┘
-                                    │
-                                    ├────────► stop gate/up weight SRAM read
-                                    ├────────► stop gate/up MAC toggle
-                                    ├────────► stop SiLU / align / mul toggle
-                                    ├────────► suppress scatter FIFO write
-                                    └────────► mark lane inactive
-```
+One sentence to reuse:
 
-This is much cleaner than the old dynamic-budget path.
+> The ET controller is a calibrated local counter loaded from SRAM, not a runtime significance predictor.
 
-If you want one sentence in the text:
-> The current ET controller is a calibrated local counter loaded from SRAM, not a runtime significance predictor.
+### 4.2 Stage-2 ET datapath
 
----
+The same primitive can be reused at stage-2 if the gains justify keeping it in the mainline design:
 
-## 3.3 Stage-2 ET note
+- `B2[h]` loaded from local SRAM
+- short local counter
+- gates consumer MAC activity and accumulator toggles
 
-You can reuse the **same static primitive** for stage-2 if needed:
+However, stage-2 ET should remain optional in the writeup structure. If its marginal gain is small, demote it to an ablation or appendix so the mainline hardware claim stays simple.
 
-- `B2[h]` is loaded from per-output calibrated SRAM
-- the counter gates local `down_proj` consumer MAC activity and accumulator toggles
-- there is still no dynamic LUT on the runtime control path
+### 4.3 Optional exact-zero side path
 
-That keeps stage-1 and stage-2 consistent with the checkpoint-termination story.
+If you include a zero shortcut, keep it narrow:
 
----
+- use exact zero information already available from encoding or quantization
+- do not introduce a new runtime significance heuristic
 
-## 3.4 Optional exact-zero side path
+This must remain a side path. The main controller is still the calibrated static counter.
 
-If you want a thin optional side branch, it should now be limited to **exact zero information already available from quantization / encoding**, not a dynamic significance heuristic.
+## 5. Required figures
 
-For example:
+### Figure A: FFN micro-tile overview
 
-```text
-if encoded_zero_flag = 1  --->  bypass lane or inject zero-valid tag
-```
+The figure should show:
 
-Draw this only as a minor side path.
-The main controller should remain the calibrated static counter.
+- FFN entry recode
+- stage-1 owner lanes with `gate_proj` and `up_proj`
+- PWL SiLU and align buffer
+- gating multiply producing `m_i[t]`
+- explicit scatter / reduce-scatter boundary
+- local stage-2 `down_proj` consumer bank
+- FFN exit encoder
 
----
+The most important visual correction relative to older drafts is that the **scatter boundary is explicit** and that the streams crossing it are labeled as **BSD streams**, not abstract numeric values.
 
-# 4. Add a cycle timeline subfigure
+### Figure B: ET controller and timing example
 
-This is still very useful, but now it should explain **ET + pipelined scatter** together.
+Make this a two-part figure.
 
----
+Part (a): per-owner ET controller
 
-## Figure B(b): Timing example with ET and pipelined scatter
+- `B1[i]` SRAM
+- down-counter
+- local gating fanout
 
-```text
-Example timing for one owner lane i and one destination down_proj shard
+Part (b): cycle timeline with exact BSD tokens
 
-cycle:            0   1   2   3   4   5   6   7   8   9   10  11  12  13
---------------------------------------------------------------------------------
-gate MAC:         d0  d1  d2  d3  d4  d5  --  --  --  --  --  --  --  --
-up MAC:           d0  d1  d2  d3  d4  d5  --  --  --  --  --  --  --  --
-B1 counter:       6   5   4   3   2   1   0
-ET state:         on  on  on  on  on  on  off off off off off off off off
+The timeline should show, for one owner lane and one destination shard:
 
-SiLU pipe:                s0  s1  s2  s3  s4
-SiLU ready:                               ↑ t_s
-up ready:                          ↑ t_u
-align / mul out:                           m0  m1  m2
-scatter issue:                             q0  q1  q2
-shard ingress FIFO:                            r0  r1  r2
-local down MAC:                                  p0  p1  p2
-local adder tree:                                 y+= y+= y+= ...
-```
+- issued BSD digits on `gate_proj` and `up_proj`
+- finite budget and ET cutoff
+- SiLU pipeline latency
+- align and multiply timing
+- scatter issue events
+- FIFO arrival events
+- stage-2 consumer start before global stage-1 completion
 
-You can make it prettier in the paper with colored bars.
+Now that the simulator tracks exact BSD streams, the timeline should use stream notation directly, for example `g0`, `g1`, `u0`, `u1`, `m0`, `m1`, rather than a float-valued carrier.
 
-This subfigure is valuable because it visually explains:
-- digit-serial execution
-- finite budget
-- SiLU latency
-- time alignment
-- immediate scatter after a lane becomes ready
-- local `down_proj` reduction starting before all owner lanes finish
+### Figure C: Macro scale-up and local ownership
 
-That last bullet is the important new point.
+Add one macro-level figure or subfigure that explains how the 32-channel macro scales:
 
----
+- replication across intermediate-channel ownership groups
+- replication across `down_proj` output shards
+- local addition tree kept inside each owned shard
+- scatter routes crossing only the shard boundary, not collapsing into a global reducer
 
-# 5. A concrete set of labels and widths
+This figure will help reviewers understand that the scatter boundary is not just a pretty diagram. It is the mechanism that keeps reduction local in the scaled design.
 
-To make the figure feel like real hardware, add small widths.
+## 6. Concrete labels and widths
 
-These are good illustrative values:
+Use small example widths so the hardware feels real:
 
-- `B1[i]`, `B2[h]`: **6 bits**
-  - enough for cycle budgets 0–63
-- ET counter: **6 bits**
-- `t_first`: **6 bits**
-  - enough for 0–63 cycle arrival
-- scatter route / shard ID: **3–5 bits**
-  - depends on macro count in the scale-up discussion
-- source-owner ID: **log2(P_total)** bits
-- SiLU segment index: **3 bits**
-  - for 8 segments
-- align FIFO depth: **4–8 entries**
-- scatter ingress FIFO depth: **4–8 entries**
-- zero flag / active flag: **1 bit**
+- `B1[i]`, `B2[h]`: 6 bits
+- ET counter: 6 bits
+- ready / first-valid register: 6 bits
+- scatter route / shard ID: 3 to 5 bits
+- source-owner ID: `log2(P_total)` bits
+- SiLU segment index: 3 bits for 8 segments
+- align FIFO depth: 4 to 8 entries
+- scatter ingress FIFO depth: 4 to 8 entries
+- active / zero flag: 1 bit
 
-These are not hard commitments, but they make your figure much more concrete.
+These are illustrative values, not architectural claims.
 
----
+## 7. Hardware results hooks that must align with the simulator
 
-# 6. A concrete low-overhead implementation choice I recommend
+The hardware plan should anticipate the trace outputs that the simulator now provides from exact BSD execution.
 
-If you want the story to stay disciplined, I would recommend:
+Required quantities to report later:
 
-## Minimal believable hardware choice
-### Stage-1:
-- **static calibrated** budget:
-  \[
-  B_1[i] = B_{1,\text{cal}}[i]
-  \]
-- local counter-based termination
+- end-to-end FFN latency with the scatter boundary included
+- stage-1 per-lane completion histogram
+- ready-time skew across owner lanes
+- scatter issue histogram
+- ingress FIFO occupancy
+- local `down_proj` addition-tree utilization
+- consumer early-start fraction
+- overlap ratio between stage-1 completion and stage-2 work
+- ET-gated activity for SRAM, MAC, SiLU, scatter, and accumulators
+- metadata storage for `B1`, `B2`, and small control state
 
-### Scatter boundary:
-- per-destination elastic FIFO
-- simple credit / round-robin issue
-- no global barrier between stage-1 finish and stage-2 start
+The hardware document should be written so that these measurements appear to be a natural consequence of the architecture, not an afterthought from the simulator.
 
-### Stage-2:
-- **static calibrated** budget:
-  \[
-  B_2[h] = B_{2,\text{cal}}[h]
-  \]
-- same local counter primitive, or a fixed consumer window if you want the first figure simpler
+## 8. Minimal believable implementation point
 
-This is a very nice compromise because:
+Keep the mainline hardware choice disciplined:
 
-- it keeps **checkpoint ET** and **deep pipeline + scatter** as two parallel lines
-- it makes the scatter overlap story visible
-- it avoids the old dynamic-budget control overhead
-- it supports a local addition tree in each owned `down_proj` shard
+### Stage-1
 
-If you want one sentence to enforce discipline:
-> The current hardware summary should not contain a runtime combined-scale LUT or a dynamic budget add-path.
+- static calibrated budget `B1[i] = B1_cal[i]`
+- local counter-based stop
 
----
+### Scatter boundary
 
-# 7. Suggested caption text
+- per-destination elastic FIFOs
+- simple credit or round-robin issue
+- no wait-for-all-owner barrier
 
-You can almost use these directly.
+### Stage-2
 
----
+- static calibrated budget `B2[h] = B2_cal[h]` if retained
+- otherwise fixed consumer window in the simplest main figure
 
-## Caption for Figure A
+This is the right compromise for the current paper because it:
 
-> **FFN-spanning MSD-first online-arithmetic micro-tile with pipelined scatter.**
-> The tile contains \(P\) intermediate-channel owner lanes and \(H\) owned `down_proj` outputs. `gate_proj` and `up_proj` operate as parallel producers under a shared stage-1 owner domain indexed by intermediate channel \(i\). The gate path passes through a pipelined PWL SiLU block, then aligns in the time domain with the `up_proj` stream before gating multiplication. The resulting owner streams carry numeric value and first-arrival timing metadata into a pipeline scatter / reduce-scatter boundary, which forwards each ready stream to the destination `down_proj` shard. The local consumer bank starts from upstream arrival rather than cycle 0, so inter-slice communication overlaps with late owner-lane completion while the addition tree remains local inside the owned output shard. Format conversion is performed only at FFN entry and FFN exit.
+- preserves the two orthogonal contribution lines
+- makes the scatter overlap mechanism explicit
+- avoids dynamic control-path overhead
+- keeps the local addition tree intact inside each output shard
 
----
+## 9. Small design-space sweep to defend the macro point
 
-## Caption for Figure B
+The paper does not need a large DSE, but the hardware plan should reserve room for one small sweep over one or two of the following:
 
-> **Low-overhead checkpoint ET with static calibrated budgets.**
-> A calibrated base budget stored in local SRAM is loaded into a short down-counter at the start of each stream. When the counter expires, the lane locally gates weight reads, digit-MAC activity, nonlinearity / multiply toggles, and scatter or accumulation writes. The controller operates at stream granularity and requires only SRAM, a short counter, and local gating logic, enabling temporal compute sparsity without a global scheduler or a runtime dynamic-budget predictor.
+- `P/H` tile shape
+- scatter FIFO depth
+- owned-shard count
+- local consumer bank width
 
----
+The goal is not optimization for its own sake. The goal is to show that the chosen illustrative macro does not hide a buffering or routing pathology.
 
-# 8. Minimum quantitative numbers to put next to the figure
+## 10. Guardrails for writing and figures
 
-Even if approximate, I would put a small table near the figure or in the text:
+Do not let the hardware story drift back into the old merged narrative.
 
-| Item | Per owner lane / local consumer shard |
-|---|---:|
-| Base budget storage | 6 b |
-| Counter | 6 b |
-| `t_first` register | 6 b |
-| Scatter route tag | 3–5 b |
-| Source-owner ID | `log2(P_total)` |
-| SiLU segment ROM | 8 entries |
-| Align FIFO depth | 4–8 |
-| Scatter ingress FIFO depth | 4–8 |
+Keep these guardrails explicit:
 
-And a one-line statement like:
+- do not describe scatter as a byproduct of ET
+- do not reintroduce a runtime combined-scale LUT or budget-add path
+- do not show `down_proj` as a monolithic global consumer
+- do not describe the internal FFN pipeline as float carrier plus metadata
+- do not reset timing semantics at the stage-1 / stage-2 boundary
+- do not make stage-2 ET central unless it materially moves the frontier
 
-> ET control storage scales with **lanes and owned outputs**, while the main scale-up benefit comes from reducing **digit-MAC activity** and overlapping **producer completion, scatter transport, and local reduction** across the FFN.
+## 11. One-sentence summary for reuse
 
-That line helps the overhead argument and keeps the summary aligned with the new story.
-
----
+> We implement a CIM-oriented FFN macro in which calibrated checkpoint budgets stop digit work locally, while an FFN-deep BSD-stream pipeline with pipelined scatter turns staggered producer completion into overlapped communication and local `down_proj` reduction.
