@@ -97,7 +97,6 @@ Important writing discipline for this section:
 - present the scatter boundary as a streaming transport interface, not a barriered handoff
 - present stage-1 timing as same-start / different-length, not first-arrival skew
 - carry the SiLU exponent update on the exponent/control path
-- do not make the paper depend on an aggressive speculative early-start `down_proj` mantissa schedule
 - keep stage-2 ET optional unless it materially improves results
 
 ## 6. Evaluation section plan
