@@ -154,8 +154,9 @@ calibration workflow:
                         help="Light mode: limit the number of dataset text samples to process "
                              "for a faster evaluation. Keeps all statistic formulas unchanged.")
     parser.add_argument("--lite", action="store_true",
-                        help="Lite stats mode: collect only utilization, zero-block%%, "
-                             "mean p_eff, and max latency per layer.  Skips expensive "
+                        help="Lite stats mode: collect only utilization, zero-element%%, "
+                            "zero-block%%, mean p_eff, and max latency per layer.  "
+                            "Skips expensive "
                              "NAF-width computation and detailed histograms for faster "
                              "MSD inference.  PPL results are identical to full mode.")
     args = parser.parse_args()
@@ -455,20 +456,22 @@ calibration workflow:
 
             if is_lite:
                 # ── Lite mode output ──
+                g_zero_elem = g.get('zero_element_percentage', g.get('mac_sparsity', 0))
+                g_zero_blk = g.get('zero_block_percentage', g.get('zero_block_ratio', 0))
                 print(f"\n{'MSD PERFORMANCE STATISTICS (LITE)':^52}")
                 print(SEP)
                 print(f"  Layers profiled  : {g.get('num_layers', 0)}")
-                print(f"  MAC sparsity     : {g.get('mac_sparsity', 0):.4%}")
+                print(f"  Zero elements    : {g_zero_elem:.4%}")
                 print(f"  Mean eff. prec.  : {g.get('mean_effective_precision', 0):.2f} digits")
                 print(f"  Global util.     : {g.get('global_utilization', 0):.4%}")
                 print(f"  HW lat. overhead : {g.get('hw_latency_overhead', 0):.4%}")
-                print(f"  Zero blocks      : {g.get('zero_block_ratio', 0):.4%}")
+                print(f"  Zero blocks      : {g_zero_blk:.4%}")
                 print(f"  Max budget       : {g.get('max_budget', 0):.1f} cycles")
                 print(f"  Max total delay  : {g.get('max_total_delay', 0):.1f} cycles")
                 print(SEP)
 
                 if pl:
-                    HDR = f"  {'Layer':<40s}  p_eff  util%  hw_lat%  zero_blk%  avg_B"
+                    HDR = f"  {'Layer':<40s}  p_eff  util%  zero_el%  zero_blk%  avg_B"
                     print(f"\n  Per-layer summary (lite):")
                     print(HDR)
                     print(f"  {'-'*80}")
@@ -476,10 +479,10 @@ calibration workflow:
                         short = lname if len(lname) <= 40 else lname[:18] + ".." + lname[-18:]
                         p_eff_v = ldata.get("p_eff_mean", 0)
                         util_v = ldata.get("utilization", 0) * 100
-                        hw_v = ldata.get("hw_latency_overhead", 0) * 100
-                        zblk_v = ldata.get("zero_block_ratio", 0) * 100
+                        zel_v = ldata.get("zero_element_percentage", ldata.get("mac_sparsity", 0)) * 100
+                        zblk_v = ldata.get("zero_block_percentage", ldata.get("zero_block_ratio", 0)) * 100
                         avg_b_v = ldata.get("avg_max_latency", 0)
-                        print(f"  {short:<40s}  {p_eff_v:5.1f}  {util_v:5.1f}  {hw_v:6.2f}   {zblk_v:6.2f}  {avg_b_v:5.1f}")
+                        print(f"  {short:<40s}  {p_eff_v:5.1f}  {util_v:5.1f}  {zel_v:7.2f}   {zblk_v:6.2f}  {avg_b_v:5.1f}")
                 print(SEP)
             else:
                 # ── Full mode output ──
