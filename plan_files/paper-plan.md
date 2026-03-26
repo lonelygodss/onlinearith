@@ -4,6 +4,10 @@
 
 This is a **CIM paper about the FFN layer of LLMs**. Online arithmetic is the execution mechanism that makes the design practical, but it is not the paper’s standalone identity. The paper should read as a CIM-oriented accelerator study that uses MSD-first BSD execution to realize calibrated compute reduction with a hardware-friendly schedule.
 
+The central advanteage we want to claim is:
+- We turn dynamic fine-grained sparsity into a cheap scheduling problem, acheiving high accuracy with low computation
+- We minimized the intermediate data flow to MSD stream and exponential stream instead of bf16 or fp32 in the whole FFN layer, grately reduced memory and data transfer cost.
+- We introduce a loccally digit pipeline micro Tile, scale better to real size LLM compared to former hierarchical CIM design.
 
 ## 2. Core technical idea
 
@@ -13,7 +17,7 @@ The project has two parallel contribution lines.
 
 Projection checkpoints use calibrated static budgets to decide how many MSD cycles are executed per channel or per output. The runtime hardware only needs short local counters and gating logic. This is the mechanism that decides **how much** compute is performed.
 
-### 2.2 FFN-deep streaming pipeline with pipelined scatter
+### 2.2 FFN-deep streaming pipeline
 
 The FFN is executed as one continuous producer-consumer pipeline across:
 - `gate_proj`
@@ -31,42 +35,7 @@ The current timing model is specific and should be stated clearly:
 
 This is what determines **how** the remaining computation is transported, localized, and overlapped.
 
-## 3. Three reviewer-checkable claims
-
-### Claim 1
-
-**Calibrated static checkpoint truncation gives a better quality / compute tradeoff than uniform budgets and post-quantization structured sparsity.**
-
-Evidence:
-- dense MX baseline
-- Wanda 2:4 after MXFP8
-- uniform MSD budgets
-- SNR-calibrated budgets
-- fixed-sum calibrated budgets
-- activation-only / weight-only / combined calibration ablation
-
-### Claim 2
-
-**Pipelined scatter is useful even when first-valid timing is aligned across channels, because stream lengths differ and exponent/control metadata can move earlier than mantissa traffic.**
-
-Evidence:
-- active-stream-count traces showing the same-start / decaying-tail pattern
-- scatter bandwidth and occupancy traces
-- exponent/control lead-time measurements
-- latency breakdown showing reduced stage-boundary burstiness and hidden consumer-side setup
-
-### Claim 3
-
-**The runtime mechanism is cheap and deterministic.**
-
-Evidence:
-- local static counters and SRAM-loaded budgets
-- no runtime dynamic-budget predictor
-- no combined-scale LUT on the critical path
-- modest FIFO, metadata, and control storage
-- local `down_proj` ownership that keeps reduction inside the shard
-
-## 4. Simulator description in the paper
+## 3. Simulator description in the paper
 
 The simulator section should now describe the exact model plainly.
 
@@ -80,7 +49,7 @@ The simulator section should now describe the exact model plainly.
 
 The simulator section should present exact BSD stream tracking as the baseline model for both timing analysis and hardware-facing traces.
 
-## 5. Hardware section plan
+## 4. Hardware section plan
 
 The hardware section should revolve around a representative **32-channel FFN macro** or `P x H` micro-tile.
 
@@ -99,16 +68,16 @@ Important writing discipline for this section:
 - carry the SiLU exponent update on the exponent/control path
 - keep stage-2 ET optional unless it materially improves results
 
-## 6. Evaluation section plan
+## 5. Evaluation section plan
 
-### 6.1 Quality and compute
+### 5.1 Quality and compute
 
 Main plots:
 - perplexity vs average cycle budget
 - perplexity vs effective utilization
 - near-lossless operating point comparison across all baselines
 
-### 6.2 Static-budget robustness
+### 5.2 Static-budget robustness
 
 Make this a primary result.
 
@@ -117,16 +86,13 @@ Show:
 - evaluation on disjoint prompts / samples
 - stability of both quality and stream-shape traces under fixed stored budgets
 
-### 6.3 Scatter and latency behavior
+### 5.3 Scatter and latency behavior
 
 Show:
-- active owner-stream count vs cycle
-- per-layer scatter-window length
-- live mantissa flits per cycle
-- exponent/control lead time
 - latency breakdown across the FFN path
+- compare with bf16 and fp32 case
 
-### 6.4 Net hardware accounting
+### 5.4 Net hardware accounting
 
 Report:
 - effective MAC utilization
@@ -138,13 +104,13 @@ Report:
 
 The emphasis should be on **net savings after overhead**, not only on skipped digits.
 
-## 7. Narrative to keep throughout the paper
+## 6. Narrative to keep throughout the paper
 
 The paper should repeatedly return to the same concise interpretation:
 
 > This work presents a CIM-oriented FFN macro that combines calibrated checkpoint-based MSD truncation with an FFN-deep streaming pipeline and pipelined scatter. Static budgets bound the amount of digit work, while exact BSD mantissa streams and earlier exponent/control metadata move through a common-start, decaying-tail scatter window that reduces burst communication pressure and enables early consumer-side setup with low control cost.
 
-## 8. Practical section order
+## 7. Practical section order
 
 A clean section order is:
 1. Motivation and why structured sparsity is not the right fit
