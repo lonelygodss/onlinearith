@@ -1,236 +1,197 @@
-# Revised simulation and data plan
+# Simulation and Data Plan
 
-## 0. Purpose of the simulation package
+## 1. Simulator model
 
-The simulation plan should now serve three reviewer-checkable claims:
+The simulator should reflect the current execution model directly.
 
-1. **Calibrated checkpoint truncation gives a better quality / compute frontier** than uniform budgeting and post-quantization structured sparsity.
-2. **Pipelined scatter converts staggered stage-1 completion into real overlap and latency reduction** at the stage-1 to stage-2 boundary.
-3. **The runtime mechanism is cheap and regular** once net activity savings and control / buffering overhead are counted together.
+- Track the **exact BSD MSD-first stream** through the FFN path end to end.
+- Model fixed pipeline latency for `gate_proj`, `up_proj`, `SiLU`, local alignment, gating, scatter, and `down_proj`.
+- Use calibrated static budgets to determine how long each owner lane remains active.
+- Enforce the current timing rule: after within-lane alignment, all owner lanes produce their **first valid mantissa MSD on the same cycle**.
+- Let calibrated budgets determine the **stream tail length** of each channel.
+- Carry a separate **exponent/control stream** that can be issued no later than the mantissa stream and may arrive earlier.
+- Include scatter arbitration, FIFO occupancy, and backpressure so that source timing remains deterministic while destination arrival still reflects network contention.
+- Model `down_proj` as a local consumer stage that can use early exponent/control arrival for delay resolution and setup, while keeping mantissa-side reduction on the simpler local policy.
 
-A major update for this revision is that the simulator now tracks the **exact BSD stream** through the FFN. The plan should state this directly and treat the exact stream as the source of truth for both quality evaluation and hardware-facing traces.
+## 2. Calibration and robustness results
 
-## 1. Simulator statement to use in the paper
+### 2.1 Budget calibration curves
 
-Use a short paragraph like this in the simulation section:
-
-> The revised simulator tracks exact MSD-first BSD streams across `gate_proj`, `up_proj`, PWL SiLU, gating, the scatter boundary, and `down_proj`. Ready times, completion skew, scatter traffic, and local consumer activity are therefore measured from the exact digit stream rather than inferred from a float-valued carrier plus timing metadata.
-
-This update materially strengthens the fidelity story and should be visible in all three plan documents.
-
-## 2. Calibration experiments
-
-### 2.1 Target-SNR smoothness
-
-Required plot:
-
+Required plots:
 - average budget versus target SNR
+- layerwise budget distribution versus target SNR
+- fixed-sum redistribution result starting from the SNR-min solution
 
-Purpose:
-
-- show that the calibration knob is smooth and monotonic
-- show that target selection is practical rather than brittle
+The purpose is to show that the calibration knob is smooth, monotonic, and easy to tune.
 
 ### 2.2 Signal-side predictiveness
 
-Required plot or table:
+Check whether channels with stronger effective signal statistics still need fewer cycles to satisfy the same distortion target. This supports why static calibration works at all.
 
-- relationship between channel signal power and required cycle budget for a fixed SNR target
+### 2.3 Stream-length predictiveness
 
-Purpose:
+Use **stream-length analysis** as the main timing-side view.
 
-- explain why uniform budgets are suboptimal
-- justify per-channel calibration as a structured, predictable policy rather than a black-box fit
+Measure:
+- per-channel calibrated stream length
+- distribution of stream end cycles relative to the common first-valid cycle
+- relationship between channel statistics and scatter-tail length
 
-### 2.3 Timing-side predictiveness
-
-Required plot:
-
-- relationship between combined activation-weight scale and intra-channel completion spread
-
-Purpose:
-
-- connect calibration features to staggered finish times
-- show that the same signal used for budget assignment also predicts the width of the downstream scatter window
+This is the timing-side quantity that now matters for scatter.
 
 ### 2.4 Static-budget robustness
 
-This should now be a headline experiment, not a side note.
+Make this a headline experiment.
 
-Required setup:
+Evaluate:
+- calibration split versus disjoint evaluation split
+- calibration-set size sweep
+- perplexity and stream-trace stability under the same stored budgets
 
-- calibration split and disjoint evaluation split
-- sweep over calibration-set size
-- at least one cross-prompt or cross-dataset check if practical
-
-Required outputs:
-
-- perplexity change on held-out data
-- budget stability statistics
-- change in ready-time / overlap traces when using budgets calibrated on a different split
-
-Reviewer question answered:
-
-> Are the stored static budgets robust enough to justify the SRAM-loaded hardware model?
+The goal is to show that the SRAM-loaded static budgets generalize and do not need runtime adaptation.
 
 ### 2.5 Budget-assignment ablation
 
-This should be mandatory if possible.
-
-Compare:
-
+Include at least:
 - uniform budget
 - activation-only heuristic
 - weight-only heuristic
-- combined activation+weight calibration
-- fixed-sum calibrated redistribution
+- combined activation + weight calibration
+- fixed-sum redistribution
 
-Purpose:
+This isolates whether the benefit really comes from the combined calibration signal rather than from any nonuniform assignment.
 
-- isolate the value of the combined signal
-- show that gains are not just from any nonuniform budget assignment
+## 3. Model quality results
 
-## 3. Quality comparison matrix
-
-The main comparison group should remain tightly scoped:
-
+Main comparison set:
 - dense MX baseline
 - Wanda 2:4 structured sparsity after MXFP8
-- uniform-budget MSD baseline
-- SNR-calibrated budget
-- fixed-sum calibrated budget
+- MSD with layer-uniform budgets
+- SNR-calibrated budgets
+- fixed-sum calibrated budgets
 
-Recommended presentation:
+Report:
+- perplexity
+- quality versus average cycle budget
+- quality versus effective utilization
 
-- perplexity versus normalized MAC activity
-- perplexity versus average cycle budget
-- one table with near-lossless operating points
+The main paper plots should emphasize the near-lossless region and the gap between checkpoint truncation and structured sparsity.
 
-Important note to preserve in the text:
+## 4. Hardware-facing trace data
 
-- near-lossless operating points still show only about 1 percent zero blocks, so the main benefit is not coarse block shutdown
-- emphasize reduced active digit work and active cycles instead
+### 4.1 End-to-end latency
 
-## 4. Scatter, overlap, and latency measurements
+Collect the cycle delay of the complete FFN path, including:
+- stage-1 projection work
+- SiLU / gating latency
+- exponent/control scatter
+- mantissa scatter window
+- local `down_proj` work
 
-Because the simulator now tracks exact BSD streams, this section should become more quantitative and more central.
+A latency-breakdown table should separate transport time, control-preparation time, and mantissa compute time.
 
-### 4.1 Primitive timing traces to collect
+### 4.2 Stream-shape traces
 
-For every evaluated operating point, collect:
+These traces are central to the updated story.
 
-- per-lane stage-1 ready cycle
-- per-lane stage-1 completion cycle
-- scatter issue cycle
-- per-destination FIFO occupancy over time
-- stage-2 first-consume cycle
-- stage-2 completion cycle
+Required traces:
+- active owner-stream count versus cycle after the common first-valid cycle
+- per-channel stream-end histogram
+- per-layer scatter-window length distribution
+- live mantissa flits per cycle at the scatter boundary
 
-### 4.2 Derived metrics to report
+These plots should make the same-start / decaying-tail behavior obvious.
 
-Convert the raw traces into a small set of paper-friendly metrics:
+### 4.3 Scatter behavior
 
-- **ready-time skew** = `max_i T_ready[i] - min_i T_ready[i]`
-- **consumer early-start fraction** = fraction of stage-2 work launched before `max_i T_stage1_done[i]`
-- **overlap ratio** = fraction of stage-2 work issued while at least one stage-1 owner lane is still active
-- **barrier-free latency reduction** = `(T_barrier_model - T_scatter_model) / T_barrier_model`
-- **scatter window width** = last issue cycle minus first issue cycle for a tile or shard
+Collect:
+- issue-time histogram for mantissa flits
+- issue-time histogram for exponent/control packets
+- per-destination FIFO occupancy
+- backpressure cycles
+- scatter completion time for each layer
+- effective bandwidth requirement under pipelined scatter
 
-These metrics are the shortest path from architectural detail to a latency claim.
+The main message is that pipelined scatter spreads communication over a multi-cycle window instead of creating a full-vector barriered burst.
 
-### 4.3 Representative visualizations
+### 4.4 Exponent/control lead-time metrics
 
-Required plots for 3 representative layers:
+Because exponent/control can arrive earlier, measure:
+- lead time between exponent/control arrival and mantissa-window completion
+- fraction of local delay-resolution or shift-selection work completed before mantissa accumulation begins
+- consumer-side setup latency hidden by early exponent/control transport
 
-- stage-1 completion histogram
-- scatter issue histogram
-- FIFO occupancy trace
-- local `down_proj` bank utilization over time
+These are the main consumer-overlap metrics for the current design.
 
-The important narrative is:
+### 4.5 `down_proj` local-consumer metrics
 
-> gated intermediate channels finish at staggered cycles, scatter starts immediately, and local `down_proj` reduction begins before the whole stage-1 slice finishes.
+Report:
+- local multiplier utilization
+- local accumulator / addition-tree utilization
+- mantissa accumulation start cycle and finish cycle under the chosen simple consumer policy
+- optional comparison against a more aggressive speculative partial-start policy, only as a side experiment if desired
 
-## 5. Activity, energy, and net-overhead accounting
+The current mainline result should not rely on a complex speculative `down_proj` schedule.
 
-This section should focus on **net** savings, not only skipped work.
+### 4.6 Compute reduction and net overhead
 
-### 5.1 Activity categories to count
+Report both savings and cost.
 
-Report activity for:
+Savings:
+- effective MAC utilization
+- skipped element fraction
+- skipped block fraction
+- active cycle reduction
 
-- digit MAC operations in stage-1
-- digit MAC operations in stage-2
-- weight SRAM reads
-- PWL SiLU activity
-- align-buffer and scatter FIFO traffic
-- local accumulator toggles
-- ET counter activity and small control logic
+Cost:
+- ET counter storage and toggle overhead
+- mantissa scatter FIFO traffic
+- exponent/control scatter traffic
+- route control overhead
+- local setup / delay-resolution overhead
 
-### 5.2 Required hardware-cost outputs
+The final accounting should be net, not just “skipped work.”
 
-Report at least:
+## 5. Figures and tables to prepare
 
-- total metadata storage for `B1`, `B2`, and small ready / route state
-- FIFO depth requirement at the chosen macro point
-- replay or backpressure events if they exist
-- local addition-tree utilization
+### Figure 1 — Calibration curves
+- average budget vs target SNR
+- fixed-sum redistribution effect
+- robustness to calibration-set size
 
-### 5.3 Main summary table
+### Figure 2 — Quality / compute Pareto
+- dense MX
+- Wanda 2:4
+- uniform MSD budgets
+- SNR-calibrated budgets
+- fixed-sum calibrated budgets
 
-Create one net-cost table that answers:
+### Figure 3 — Stream and scatter timeline
+- common first-valid cycle
+- variable stream lengths
+- live mantissa flits per cycle
+- exponent/control arrival lead time
 
-- gross activity reduction
-- buffering and routing overhead
-- ET-control overhead
-- resulting net latency / energy benefit
+### Figure 4 — Latency breakdown
+- stage-1
+- nonlinear / gating
+- exponent/control transport
+- mantissa transport
+- local `down_proj`
 
-This table should be one of the paper's most rebuttal-resistant pieces of evidence.
+### Table 1 — Net overhead accounting
+- counters
+- FIFOs
+- route metadata
+- exponent/control traffic
+- local setup logic
 
-## 6. Fidelity and implementation validation
+### Table 2 — Macro-level utilization summary
+- MAC utilization
+- local consumer utilization
+- scatter occupancy statistics
+- total FFN latency
 
-The old concern about float-carrier approximation is now largely removed by the exact BSD update, but there is still value in a short validation section.
+## 6. One-sentence summary for the evaluation section
 
-Recommended checks:
-
-- compare the revised FFN-wide simulator against a smaller operator-local or trace-replay reference for a few representative layers and tokens
-- confirm identical or near-identical output stream reconstruction for the exact-BSD path
-- confirm that scatter scheduling and FIFO timing are preserved in the reference traces
-
-What this section should say:
-
-> Arithmetic fidelity comes from exact BSD-stream tracking; the remaining validation target is the event-scheduling and buffering model.
-
-Keep this validation small but explicit so reviewers see that fidelity was checked, not assumed.
-
-## 7. Recommended figure and table package
-
-Minimum set:
-
-1. calibration smoothness and predictiveness plots
-2. static-budget robustness plot
-3. perplexity frontiers across the comparison matrix
-4. scatter / overlap trace figures for representative layers
-5. net activity / overhead table
-
-Optional appendix items:
-
-- activation-only vs weight-only ablation details
-- per-layer robustness breakdown
-- small tile-shape or FIFO-depth sensitivity sweep
-
-## 8. Priority order for implementation
-
-If time is limited, finish the experiments in this order:
-
-1. static-budget robustness
-2. scatter-derived latency metrics
-3. net overhead / metadata table
-4. signal-ablation comparison
-5. small validation spot-checks
-
-This order best supports the current paper claim structure.
-
-## 9. One-sentence summary for reuse
-
-> The revised simulator now uses exact BSD-stream execution to connect calibration, perplexity, staggered completion, pipelined scatter, and net hardware activity within one consistent FFN-wide trace framework.
+> The evaluation should show that calibrated static budgets improve the quality/compute tradeoff over uniform budgets and structured sparsity, while exact BSD-stream simulation reveals a same-start / decaying-tail scatter pattern in which earlier exponent/control transport hides consumer-side setup and pipelined scatter reduces burst communication pressure.
