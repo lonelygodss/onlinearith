@@ -42,7 +42,7 @@ That stack keeps the motivation, method, and microarchitecture aligned.
 
 **Figure 5 — Why the offline/online split is credible**  
 **Where it goes:** validation subsection after Figure 4.  
-**What it shows:** panel (a) average budget versus target SNR, showing a smooth monotonic knob. Panel (b) robustness to calibration-set size and held-out evaluation split. Panel (c) budget-assignment ablation at fixed total budget: uniform, activation-only, weight-only, combined activation+weight, fixed-sum redistribution.  
+**What it shows:** panel (a) average budget versus target SNR, showing a smooth monotonic knob. Panel (b) robustness to calibration-set size and held-out evaluation split. Panel (c) budget-calibration ablation at fixed total budget: uniform, activation-only, weight-only, combined activation+weight, fixed-sum redistribution.  
 **What it must prove:** the SRAM-loaded static budgets are not brittle. They are tunable, they generalize across held-out data, and the combined activation/weight signal matters more than any simple one-sided heuristic.  
 **Caption spine:** “Stored budgets plus online temporal significance metadata form a robust offline/online split: the knob is smooth, generalizes across held-out data, and is strongest when derived from combined activation and weight information.”  
 **Failure mode to avoid:** turning this into a calibration deep dive. The point is not “look at our solver”; the point is “the offline/online split is credible.”  
@@ -51,12 +51,12 @@ That stack keeps the motivation, method, and microarchitecture aligned.
 **Where it goes:** hardware-facing trace subsection.  
 **What it shows:** panel (a) a timing schematic with common first-valid cycle, early control arrival, and variable stream tails. Panel (b) active owner-stream count versus cycle. Panel (c) live mantissa flits per cycle at the scatter boundary. Panel (d) stream-end histogram or scatter completion distribution.  
 **What it must prove:** the producer-consumer FFN pipeline is doing real work for the system story. Intermediate communication is spread over a multi-cycle window rather than arriving as a barriered burst, and the control-first/data-later split gives the consumer side time to prepare.  
-**Caption spine:** “Aligned first-valid emission, variable tails, and a control-first scatter boundary turn the FFN middle into a manageable multi-cycle workload rather than a full-vector burst.”  
+**Caption spine:** “Aligned first-valid emission, variable tails, and a multi-cycle workload scatter boundary turn the FFN middle into a manageable multi-cycle workload rather than a full-vector burst.”  
 **Failure mode to avoid:** showing only one pretty trace. At least one panel needs to summarize behavior statistically across many layers/tokens so it reads as system evidence, not a hand-picked example.  
 
 **Figure 7 — End-to-end latency and net payoff**  
 **Where it goes:** last Results subsection.  
-**What it shows:** panel (a) stacked latency breakdown: stage-1 projection work, nonlinear/gating, exponent/control scatter, mantissa scatter, local `down_proj`. Panel (b) net gain waterfall or savings-vs-cost plot: skipped blocks/elements/active cycles on one side, metadata storage/FIFO/control/setup overhead on the other. Panel (c) one small microarchitectural sweep such as `Wm` or ingress FIFO depth.  
+**What it shows:** panel (a) stacked latency breakdown: stage-1 projection work, nonlinear/gating, intremediate scatter, local `down_proj`. Panel (b) net gain waterfall or savings-vs-cost plot: skipped blocks/elements/active cycles on one side, metadata storage/FIFO/control/setup overhead on the other. Panel (c) one small microarchitectural sweep such as `Wm` or ingress FIFO depth.  
 **What it must prove:** the method wins **after** overheads are counted. This is the “ICCAD reviewer check”: not only are you suppressing useful work, but the control/transport machinery does not give the benefit back. The small sensitivity panel makes the hardware look implementable rather than tuned to a single sweet spot.  
 **Caption spine:** “Useful-window execution remains beneficial after accounting for scatter, storage, and control overhead, and the benefit is stable across reasonable transport parameters.”  
 **Failure mode to avoid:** reporting only active-cycle reduction. The figure has to be explicitly net.  
@@ -72,15 +72,12 @@ Put this near Figure 7. It should separate storage overhead, control overhead, s
 ## Appendix figure plan
 
 **Appendix Figure A1 — Useful-window scheduler details.**  
-Show `cfg_active/cfg_shadow`, `block_kill`, `start_ctr`, `rem_ctr`, and the `t_arr / L / W` mapping into the three savings levels. This proves the control plane is implementable, but it is too detailed for the main text.
+Show `cfg_active/cfg_shadow`, `block_skip`, `start_ctr`, `rem_ctr`, and the `t_arr / L / W` mapping into the three savings levels. This proves the control plane is implementable, but it is too detailed for the main text.
 
 **Appendix Figure A2 — Variable-tail stream-length detail.**  
 Use this to support Figure 6 with more granular per-layer or per-block distributions.
 
-**Appendix Figure A3 — Extra control-first scatter traces.**  
-Only needed if reviewers are likely to challenge congestion or backpressure.
-
-**Appendix Figure A4 — Secondary sensitivities.**  
+**Appendix Figure A3 — Secondary sensitivities.**  
 Block size, separate gate/up budgets, or additional `down_proj` variants belong here unless one becomes a central result.  
 
 ## The writing order I would actually use
