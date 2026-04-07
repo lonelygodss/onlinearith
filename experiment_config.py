@@ -32,6 +32,10 @@ MXFP_MSD_FIELDS: list[str] = [
     "mxfp6_format",         # "e2m3" or "e3m2"
     "use_mxfp4",
     "mxfp4_block_size",
+    # Activation-only structured sparsity
+    "use_activation_nm_sparsity",
+    "activation_nm_n",
+    "activation_nm_m",
     # MSD truncation
     "use_msd_truncation",
     "msd_cycle_budget",
@@ -55,6 +59,9 @@ BASELINE_CONFIG: dict = {
     "mxfp6_format": "e2m3",
     "use_mxfp4": False,
     "mxfp4_block_size": 32,
+    "use_activation_nm_sparsity": False,
+    "activation_nm_n": 2,
+    "activation_nm_m": 4,
     "use_msd_truncation": False,
     "msd_cycle_budget": 16,
     "msd_online_delay": 2,
@@ -244,6 +251,12 @@ def get_active_flags(config) -> str:
     else:
         parts.append("FP16 baseline")
 
+    # Activation n:m runtime sparsity
+    if getattr(config, "use_activation_nm_sparsity", False):
+        n = getattr(config, "activation_nm_n", 2)
+        m = getattr(config, "activation_nm_m", 4)
+        parts.append(f"ACT N:M {n}:{m}")
+
     # MSD
     if getattr(config, "use_msd_truncation", False):
         budget = getattr(config, "msd_cycle_budget", 16)
@@ -335,6 +348,9 @@ def reconfigure_mlp_layers(model, device: torch.device) -> None:
             if hasattr(old, "bias_param") and old.bias_param is not None:
                 new.bias_param = old.bias_param
             new = new.to(device)
+            # Preserve train/eval mode of replaced projections.
+            # This is required because new modules default to train mode.
+            new.train(old.training)
             setattr(module, attr, new)
 
     # Invalidate MSD context so it re-walks modules & re-sets layer_name etc.

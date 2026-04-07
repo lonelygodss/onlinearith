@@ -1381,3 +1381,18 @@ python calibrate_base.py --nproc 4 -n 2 -m 4
 # Computes the generated outputs accurately running entirely via standard MX calculation logic
 python ppl_batch_base.py --nproc 4 -n 2 -m 4
 ```
+
+### Activation-only Runtime N:M (No Calibration Files)
+
+This mode applies n:m sparsity to activations dynamically at inference time.
+It does not use `calibrate_base.py` and does not load `calibration_base_*.pt` masks.
+
+```bash
+# Runtime activation-only n:m sparsity over MXFP setups
+python act_base/ppl_batch_base_act.py --nproc 4 -n 2 -m 4
+
+# Sweep multiple n:m pairs with one command
+python act_base/ppl_batch_base_act_scan.py --nm 2:4 1:4 --nproc 4
+```
+
+Results are saved under `~/coding/data/act_base/{n}-{m}/`.
