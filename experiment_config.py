@@ -104,7 +104,6 @@ def _msd(budget: int = 16, pipeline: bool = False, **extra) -> dict:
 # Overrides are applied ON TOP of BASELINE_CONFIG.
 
 SETUPS: list[tuple[int, str, str, dict]] = [
-    # ── Tier 1: Baseline & MX-only ──
     (1,  "baseline",          "FP16 baseline (no quantization)",
      {"use_mxfp8": False, "use_mxfp6": False, "use_mxfp4": False}),
 
@@ -120,7 +119,6 @@ SETUPS: list[tuple[int, str, str, dict]] = [
     (5,  "MXFP4",             "MXFP4 only",
      {"use_mxfp4": True}),
 
-    # ── Tier 2: MSD default budget (B=16) across formats ──
     (6,  "MXFP8_MSD_B16",    "MXFP8 + MSD B=16",
      {"use_mxfp8": True, **_msd(16)}),
 
@@ -133,14 +131,11 @@ SETUPS: list[tuple[int, str, str, dict]] = [
     (9,  "MXFP4_MSD_B16",    "MXFP4 + MSD B=16",
      {"use_mxfp4": True, **_msd(16)}),
 
-    # ── Tier 3: Budget sweep (MXFP8) ──
     (10, "MXFP8_MSD_B8",     "MXFP8 + MSD B=8",
      {"use_mxfp8": True, **_msd(8)}),
 
     (11, "MXFP8_MSD_B12",    "MXFP8 + MSD B=12",
      {"use_mxfp8": True, **_msd(12)}),
-
-    # (B=16 already covered by setup #6)
 
     (12, "MXFP8_MSD_B20",    "MXFP8 + MSD B=20",
      {"use_mxfp8": True, **_msd(20)}),
@@ -151,17 +146,15 @@ SETUPS: list[tuple[int, str, str, dict]] = [
     (14, "MXFP8_MSD_B32",    "MXFP8 + MSD B=32",
      {"use_mxfp8": True, **_msd(32)}),
 
-    # ── Tier 3b: Budget sweep (MXFP4) ──
-    (15, "MXFP4_MSD_B8",     "MXFP4 + MSD B=8",
-     {"use_mxfp4": True, **_msd(8)}),
+    (15, "MXFP8_MSD_B14",     "MXFP8 + MSD B=14",
+     {"use_mxfp8": True, **_msd(14)}),
 
-    (16, "MXFP4_MSD_B12",    "MXFP4 + MSD B=12",
-     {"use_mxfp4": True, **_msd(12)}),
+    (16, "MXFP8_MSD_B10",    "MXFP8 + MSD B=10",
+     {"use_mxfp8": True, **_msd(10)}),
 
-    # (B=16 already covered by setup #9)
 
-    (17, "MXFP4_MSD_B20",    "MXFP4 + MSD B=20",
-     {"use_mxfp4": True, **_msd(20)}),
+    (17, "MXFP8_MSD_B18",    "MXFP8 + MSD B=18",
+     {"use_mxfp8": True, **_msd(18)}),
 
     (18, "MXFP4_MSD_B24",    "MXFP4 + MSD B=24",
      {"use_mxfp4": True, **_msd(24)}),
@@ -169,7 +162,6 @@ SETUPS: list[tuple[int, str, str, dict]] = [
     (19, "MXFP4_MSD_B32",    "MXFP4 + MSD B=32",
      {"use_mxfp4": True, **_msd(32)}),
 
-    # ── Tier 4: Deep pipeline ──
     (20, "MXFP8_MSD_B16_pipeline", "MXFP8 + MSD B=16 + pipeline",
      {"use_mxfp8": True, **_msd(16, pipeline=True)}),
 

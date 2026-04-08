@@ -1391,8 +1391,25 @@ It does not use `calibrate_base.py` and does not load `calibration_base_*.pt` ma
 # Runtime activation-only n:m sparsity over MXFP setups
 python act_base/ppl_batch_base_act.py --nproc 4 -n 2 -m 4
 
-# Sweep multiple n:m pairs with one command
-python act_base/ppl_batch_base_act_scan.py --nm 2:4 1:4 --nproc 4
+# Single-GPU MXFP8-focused sweep over multiple n:m pairs
+python act_base/ppl_batch_base_act_scan.py -nm 2:4 1:4 3:8 --only 1 --gpu 0
 ```
 
 Results are saved under `~/coding/data/act_base/{n}-{m}/`.
+
+### WANDA-base Sequential Scan (Calibrate + PPL)
+
+For the original baseline flow (offline mask calibration + PPL evaluation), use
+the packaged scripts under `wanda_base/`. This scan mode runs each n:m pair in
+two stages on a single GPU: first calibration, then PPL evaluation.
+
+```bash
+# Single-GPU MXFP8-focused n:m sweep (calibrate -> ppl for each pair)
+python wanda_base/wanda_base_scan.py -nm 2:4 1:4 3:8 --only 1 --gpu 0
+
+# Or run each stage manually from the wanda_base package
+python wanda_base/calibrate_base.py --only 1 -n 2 -m 4 --nproc 1 --gpus 0
+python wanda_base/ppl_batch_base.py --only 1 -n 2 -m 4 --nproc 1 --gpus 0
+```
+
+WANDA-base artifacts are saved under `~/coding/data/wanda_base/{n}-{m}/`.

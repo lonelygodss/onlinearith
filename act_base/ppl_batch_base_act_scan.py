@@ -3,8 +3,8 @@ Run activation-only n:m PPL batches over multiple (n, m) pairs.
 
 Usage:
     cd /home/xzj/coding/onlinearith
-    python act_base/ppl_batch_base_act_scan.py --nm 2:4 1:4
-    python act_base/ppl_batch_base_act_scan.py --nm 2:4 1:4 --nproc 4 --gpus 0,1,2,3
+    python act_base/ppl_batch_base_act_scan.py -nm 2:4 1:4 --only 1
+    python act_base/ppl_batch_base_act_scan.py -nm 2:4 1:4 --only 1 --gpu 0
     python act_base/ppl_batch_base_act_scan.py --nm "(2,4)" "(1,4)" --force
 """
 
@@ -44,27 +44,57 @@ def parse_nm(token: str) -> tuple[int, int]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Sweep activation-only ppl_batch_base_act over multiple n:m pairs."
+        description="Single-GPU sequential sweep of activation-only ppl_batch_base_act over multiple n:m pairs."
     )
     parser.add_argument(
         "--nm",
+        "-nm",
         nargs="+",
         required=True,
         type=parse_nm,
         metavar="N:M",
         help="List of n:m pairs, e.g. --nm 2:4 1:4 (or 2,4 / 2-4 / (2,4)).",
     )
-    parser.add_argument("--only", nargs="+", type=int, metavar="ID", help="Forwarded to runner.")
+    parser.add_argument(
+        "--only",
+        nargs="+",
+        type=int,
+        metavar="ID",
+        default=[1],
+        help="Setup IDs forwarded to runner (default: 1 for MXFP8 only).",
+    )
     parser.add_argument("--list", action="store_true", help="Forwarded to runner.")
     parser.add_argument("--force", action="store_true", help="Forwarded to runner.")
-    parser.add_argument("--nproc", type=int, default=None, metavar="N", help="Forwarded to runner.")
-    parser.add_argument("--gpus", type=str, default=None, help="Forwarded to runner.")
+    parser.add_argument(
+        "--nproc",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Runner process count. This scan mode is single-GPU; only 1 is allowed.",
+    )
+    parser.add_argument(
+        "--gpu",
+        type=int,
+        default=None,
+        help="Single physical GPU ID, forwarded as --gpus <id>.",
+    )
+    parser.add_argument("--gpus", type=str, default=None, help="Single GPU ID string (alternative to --gpu).")
     parser.add_argument(
         "--continue-on-error",
         action="store_true",
         help="Continue remaining pairs even if one run fails.",
     )
     args = parser.parse_args()
+
+    if args.nproc != 1:
+        raise SystemExit("ERROR: this scan mode is single-GPU only; use --nproc 1.")
+
+    if args.gpus is not None and "," in args.gpus:
+        raise SystemExit("ERROR: this scan mode accepts only one GPU ID.")
+
+    selected_gpu = args.gpus
+    if selected_gpu is None and args.gpu is not None:
+        selected_gpu = str(args.gpu)
 
     unique_pairs: list[tuple[int, int]] = []
     seen: set[tuple[int, int]] = set()
@@ -85,17 +115,16 @@ def main() -> None:
             str(n),
             "-m",
             str(m),
+            "--nproc",
+            "1",
         ]
-        if args.nproc is not None:
-            cmd.extend(["--nproc", str(args.nproc)])
-        if args.gpus is not None:
-            cmd.extend(["--gpus", args.gpus])
+        if selected_gpu is not None:
+            cmd.extend(["--gpus", selected_gpu])
         if args.force:
             cmd.append("--force")
         if args.list:
             cmd.append("--list")
-        if args.only:
-            cmd.extend(["--only", *[str(sid) for sid in args.only]])
+        cmd.extend(["--only", *[str(sid) for sid in args.only]])
 
         print()
         print(f"[scan] ({i}/{len(unique_pairs)}) n={n}, m={m}")
