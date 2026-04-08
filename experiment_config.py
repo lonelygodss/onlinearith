@@ -131,23 +131,23 @@ SETUPS: list[tuple[int, str, str, dict]] = [
     (9,  "MXFP4_MSD_B16",    "MXFP4 + MSD B=16",
      {"use_mxfp4": True, **_msd(16)}),
 
-    (10, "MXFP8_MSD_B8",     "MXFP8 + MSD B=8",
-     {"use_mxfp8": True, **_msd(8)}),
+    (10, "MXFP8_MSD_B4",     "MXFP8 + MSD B=4",
+     {"use_mxfp8": True, **_msd(4)}),
 
-    (11, "MXFP8_MSD_B12",    "MXFP8 + MSD B=12",
-     {"use_mxfp8": True, **_msd(12)}),
+    (11, "MXFP8_MSD_B5",    "MXFP8 + MSD B=5",
+     {"use_mxfp8": True, **_msd(5)}),
 
-    (12, "MXFP8_MSD_B20",    "MXFP8 + MSD B=20",
-     {"use_mxfp8": True, **_msd(20)}),
+    (12, "MXFP8_MSD_B6",    "MXFP8 + MSD B=6",
+     {"use_mxfp8": True, **_msd(6)}),
 
-    (13, "MXFP8_MSD_B24",    "MXFP8 + MSD B=24",
-     {"use_mxfp8": True, **_msd(24)}),
+    (13, "MXFP8_MSD_B7",    "MXFP8 + MSD B=7",
+     {"use_mxfp8": True, **_msd(7)}),
 
-    (14, "MXFP8_MSD_B32",    "MXFP8 + MSD B=32",
-     {"use_mxfp8": True, **_msd(32)}),
+    (14, "MXFP8_MSD_B9",    "MXFP8 + MSD B=9",
+     {"use_mxfp8": True, **_msd(9)}),
 
-    (15, "MXFP8_MSD_B14",     "MXFP8 + MSD B=14",
-     {"use_mxfp8": True, **_msd(14)}),
+    (15, "MXFP8_MSD_B11",     "MXFP8 + MSD B=11",
+     {"use_mxfp8": True, **_msd(11)}),
 
     (16, "MXFP8_MSD_B10",    "MXFP8 + MSD B=10",
      {"use_mxfp8": True, **_msd(10)}),
