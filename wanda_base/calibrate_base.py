@@ -1,5 +1,6 @@
 import argparse
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -41,6 +42,19 @@ CAL_SETUPS = [
 
 MODEL_PATH = str((WORKSPACE_ROOT / "Qwen3-0.6B").resolve())
 CAL_DATASET = ("wikitext", "wikitext-2-raw-v1", "validation")
+
+
+def _normalize_output_hook(raw_hook: str) -> str:
+    hook = raw_hook.strip()
+    if not hook:
+        return ""
+    hook = re.sub(r"[^A-Za-z0-9._-]+", "_", hook)
+    return hook.strip("_")
+
+
+def _calibration_filename(tag: str, output_hook: str) -> str:
+    suffix = f"_{output_hook}" if output_hook else ""
+    return f"calibration_base_{tag}{suffix}.pt"
 
 
 def calibrate_baseline_sparsify(model, tokenizer, calibration_texts, n=2, m=4, max_length=512, batch_size=4):
@@ -130,7 +144,7 @@ def main():
     parser.add_argument("--list", action="store_true", help="List all calibration setups and exit")
     parser.add_argument("--setup", type=int, default=None, metavar="ID", help="Run a single setup by ID (1-4)")
     parser.add_argument("--only", nargs="+", type=int, metavar="ID", help="Run only specific setup IDs (space separated)")
-    parser.add_argument("--num-texts", type=int, default=128, help="Number of paragraphs for calibration")
+    parser.add_argument("--num-texts", type=int, default=2048, help="Number of paragraphs for calibration")
     parser.add_argument("--max-length", type=int, default=512, help="Max sequence length")
     parser.add_argument("--batch-size", type=int, default=4, help="Batch size for forward hook accumulation")
     parser.add_argument("-n", type=int, default=2, help="Sparsify n elements in each group")
@@ -138,8 +152,17 @@ def main():
     parser.add_argument("--force", action="store_true", help="Overwrite existing calibration files")
     parser.add_argument("--nproc", type=int, default=1, help="Auto-launch torchrun with N processes")
     parser.add_argument("--gpus", type=str, default="", help="Comma-separated list of GPUs to use")
+    parser.add_argument(
+        "--output-hook",
+        type=str,
+        default="",
+        help="Optional suffix appended to calibration filenames (shared with ppl_batch_base).",
+    )
     
     args, unparsed = parser.parse_known_args()
+    output_hook = _normalize_output_hook(args.output_hook)
+    if args.output_hook.strip() and not output_hook:
+        raise SystemExit("Invalid --output-hook: must contain at least one alphanumeric, '.', '_' or '-'.")
 
     # ── torchrun auto-launcher ──
     restrict_gpus(args.gpus)
@@ -184,6 +207,8 @@ def main():
         print(f"World size: {world_size}  |  Device: {device}  |  dtype: {dtype}")
         print(f"Total setups: {len(run_setups)}  |  Setups on this rank: {len(my_setups)}")
         print(f"Struct sparsification: {args.n}:{args.m}")
+        if output_hook:
+            print(f"Output hook: {output_hook}")
         print(f"Output directory: {RESULTS_DIR}")
         print()
 
@@ -211,7 +236,7 @@ def main():
 
     # ── Run assigned setups ──
     for sid, tag, desc, raw_config in my_setups:
-        result_file = RESULTS_DIR / f"calibration_base_{tag}.pt"
+        result_file = RESULTS_DIR / _calibration_filename(tag, output_hook)
         if result_file.exists() and not args.force:
             print(f"[rank {rank}] Skipping setup {sid} ({tag}), already calibrated.")
             continue

@@ -214,7 +214,15 @@ calibration workflow:
                              "mean p_eff, and max latency per layer.  Skips expensive "
                              "NAF-width computation and detailed histograms for faster "
                              "MSD inference.  PPL results are identical to full mode.")
+    parser.add_argument("--figure5-layer-cycles", action="store_true",
+                        help="Enable Figure 5 layer-cycle profiling in lite stats mode. "
+                             "Records per-layer cycle moments from block-serial, "
+                             "channel-parallel execution estimates.")
     args = parser.parse_args()
+
+    auto_enabled_lite = args.figure5_layer_cycles and not args.lite
+    if auto_enabled_lite:
+        args.lite = True
 
     # ── List mode (no GPU needed) ──
     if args.list:
@@ -307,16 +315,22 @@ calibration workflow:
             print(f"Calibration loaded: {args.calibration} ({n_layers} layers, {n_channels} channels)")
 
     # ── 3c. Configure lite stats mode (if --lite given) ─────────────────────────
+    if auto_enabled_lite and is_main(rank):
+        print("Figure 5 cycle profiling requested without --lite; enabling lite stats mode.")
     if args.lite:
         model.config.msd_perf_stats_lite = True
         if is_main(rank):
             print("Lite stats mode: skipping NAF-width & histograms for faster inference.")
+    if args.figure5_layer_cycles:
+        model.config.msd_figure5_layer_cycles = True
+        if is_main(rank):
+            print("Figure 5 layer-cycle profiling enabled.")
     # Disable stats entirely on non-rank-0 processes (saves compute & memory;
     # rank 0's window sample is representative for aggregate stats).
     if not is_main(rank):
         model.config.msd_perf_stats_enabled = False
     # Invalidate cached MSD context so it picks up the new flags
-    if (args.lite or not is_main(rank)) and hasattr(model, "_msd_context"):
+    if (args.lite or args.figure5_layer_cycles or not is_main(rank)) and hasattr(model, "_msd_context"):
         model._msd_context = None
         model._msd_context_config_hash = None
 
@@ -560,6 +574,23 @@ calibration workflow:
                         zblk_v = ldata.get("zero_block_ratio", 0) * 100
                         avg_b_v = ldata.get("avg_max_latency", 0)
                         print(f"  {short:<40s}  {p_eff_v:5.1f}  {util_v:5.1f}  {hw_v:6.2f}   {zblk_v:6.2f}  {avg_b_v:5.1f}")
+
+                    has_figure5 = any("avg_layer_cycle" in ldata for ldata in pl.values())
+                    if has_figure5:
+                        HDR2 = f"  {'Layer':<40s}  layer_avg  ch_mean  layer_std  ch_std_avg"
+                        print(f"\n  Figure 5 cycle summary:")
+                        print(HDR2)
+                        print(f"  {'-'*88}")
+                        for lname, ldata in pl.items():
+                            short = lname if len(lname) <= 40 else lname[:18] + ".." + lname[-18:]
+                            layer_avg = ldata.get("avg_layer_cycle", 0)
+                            ch_mean = ldata.get("avg_mean_channel_cycle", 0)
+                            layer_std = ldata.get("layer_cycle_std", 0)
+                            ch_std = ldata.get("avg_std_channel_cycle", 0)
+                            print(
+                                f"  {short:<40s}  {layer_avg:9.3f}  {ch_mean:7.3f}  "
+                                f"{layer_std:9.3f}  {ch_std:10.3f}"
+                            )
                 print(SEP)
             else:
                 # ── Full mode output ──

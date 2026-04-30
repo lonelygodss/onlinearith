@@ -98,6 +98,29 @@ RESULTS_DIR = None   # set in main()
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
+def _normalize_output_hook(raw_hook: str) -> str:
+    hook = raw_hook.strip()
+    if not hook:
+        return ""
+    hook = re.sub(r"[^A-Za-z0-9._-]+", "_", hook)
+    return hook.strip("_")
+
+
+def _ppl_result_filename(tag: str, output_hook: str) -> str:
+    suffix = f"_{output_hook}" if output_hook else ""
+    return f"ppl_results_{tag}{suffix}.json"
+
+
+def _calibration_mask_filename(tag: str, output_hook: str) -> str:
+    suffix = f"_{output_hook}" if output_hook else ""
+    return f"calibration_base_{tag}{suffix}.pt"
+
+
+def _summary_filename(output_hook: str) -> str:
+    suffix = f"_{output_hook}" if output_hook else ""
+    return f"ppl_batch_base_summary{suffix}.json"
+
+
 def evaluate_ppl(model, encodings, device, seq_len, num_words, num_chars, num_bytes,
                  show_progress=True):
     """Run sliding-window PPL and return a results dict."""
@@ -215,6 +238,8 @@ def run_complete_mode(args):
             cmd.append("--force")
         if args.only:
             cmd.extend(["--only", *[str(s) for s in args.only]])
+        if args.output_hook:
+            cmd.extend(["--output-hook", args.output_hook])
 
         print()
         print(f"[complete] ({idx}/{len(cases)}) Running n={n}, m={m} in {case_dir.name}")
@@ -255,7 +280,16 @@ def main():
     parser.add_argument("--gpus", type=str, default=None,
                         help="Comma-separated physical GPU IDs to use, e.g. '4,5,6,7'. "
                              "Must match --nproc (or --nproc_per_node if using torchrun).")
+    parser.add_argument(
+        "--output-hook",
+        type=str,
+        default="",
+        help="Optional suffix appended to mask/result filenames (must match calibrate_base).",
+    )
     args = parser.parse_args()
+    output_hook = _normalize_output_hook(args.output_hook)
+    if args.output_hook.strip() and not output_hook:
+        raise SystemExit("Invalid --output-hook: must contain at least one alphanumeric, '.', '_' or '-'.")
 
     if args.complete:
         exit_code = run_complete_mode(args)
@@ -280,7 +314,7 @@ def main():
             print(f"{'ID':>3}  {'Tag':<30}  Description")
             print("-" * 75)
             for sid, tag, desc, _ in SETUPS:
-                result_file = RESULTS_DIR / f"ppl_results_{tag}.json"
+                result_file = RESULTS_DIR / _ppl_result_filename(tag, output_hook)
                 exists = "  (done)" if result_file.exists() else ""
                 print(f"{sid:3d}  {tag:<30}  {desc}{exists}")
         cleanup_distributed()
@@ -305,6 +339,8 @@ def main():
     if is_main(rank):
         print(f"World size: {world_size}  |  Device: {device}  |  dtype: {dtype}")
         print(f"Total setups: {len(run_setups)}  |  Setups on this rank: {len(my_setups)}")
+        if output_hook:
+            print(f"Output hook: {output_hook}")
         print()
 
     # ── Device & model ──
@@ -343,7 +379,7 @@ def main():
     total_start = time.perf_counter()
 
     for i, (sid, tag, desc, overrides) in enumerate(my_setups):
-        result_file = RESULTS_DIR / f"ppl_results_{tag}.json"
+        result_file = RESULTS_DIR / _ppl_result_filename(tag, output_hook)
         print(f"[rank {rank}] {'='*55}")
         print(f"[rank {rank}]   [{i+1}/{len(my_setups)}]  Setup #{sid}: {desc}")
         print(f"[rank {rank}]   Tag: {tag}  ->  {result_file.name}")
@@ -371,7 +407,7 @@ def main():
             print(f"[rank {rank}]   {line}")
 
         # Inject sparsity masks BEFORE evaluation
-        mask_file = RESULTS_DIR / f"calibration_base_{tag}.pt"
+        mask_file = RESULTS_DIR / _calibration_mask_filename(tag, output_hook)
         if not mask_file.exists():
             print(f"[rank {rank}]   WARNING: Mask file {mask_file} not found. Skipping.")
             continue
@@ -403,6 +439,7 @@ def main():
         results["dataset"] = f"{ds_name}/{ds_config}/{ds_split}"
         results["config"] = {"max_length": MAX_LENGTH, "stride": STRIDE,
                              "dtype": str(dtype), "world_size": world_size}
+        results["output_hook"] = output_hook or None
         results["config_snapshot"] = get_config_snapshot(model.config)
 
         # Save
@@ -431,7 +468,7 @@ def main():
 
         summary_rows = []
         for sid, tag, desc, overrides in run_setups:
-            result_file = RESULTS_DIR / f"ppl_results_{tag}.json"
+            result_file = RESULTS_DIR / _ppl_result_filename(tag, output_hook)
             if result_file.exists():
                 with open(result_file) as f:
                     res = json.load(f)
@@ -465,11 +502,12 @@ def main():
 
         # ── Save consolidated summary JSON ──
         from datetime import datetime, timezone
-        summary_file = RESULTS_DIR / "ppl_batch_base_summary.json"
+        summary_file = RESULTS_DIR / _summary_filename(output_hook)
         summary = {
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "model": MODEL_PATH,
             "dataset": "/".join(DATASET),
+            "output_hook": output_hook or None,
             "eval_config": {"max_length": MAX_LENGTH, "stride": STRIDE,
                             "dtype": str(dtype)},
             "world_size": world_size,

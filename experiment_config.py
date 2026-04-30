@@ -47,6 +47,7 @@ MXFP_MSD_FIELDS: list[str] = [
     "msd_pipeline_precision_loss",
     "msd_calibration_data",
     "msd_chunk_target_mib",
+    "msd_figure5_layer_cycles",
 ]
 
 # ── Baseline config: everything off, all fields at their Qwen3Config defaults
@@ -72,6 +73,7 @@ BASELINE_CONFIG: dict = {
     "msd_pipeline_precision_loss": 2,
     "msd_calibration_data": None,
     "msd_chunk_target_mib": 1536,
+    "msd_figure5_layer_cycles": False,
 }
 
 
@@ -87,6 +89,7 @@ _MSD_DEFAULTS: dict = {
     "msd_deep_pipeline": False,
     "msd_pipeline_precision_loss": 2,
     "msd_calibration_data": None,
+    "msd_figure5_layer_cycles": False,
 }
 
 
@@ -134,8 +137,8 @@ SETUPS: list[tuple[int, str, str, dict]] = [
     (10, "MXFP8_MSD_B4",     "MXFP8 + MSD B=4",
      {"use_mxfp8": True, **_msd(4)}),
 
-    (11, "MXFP8_MSD_B5",    "MXFP8 + MSD B=5",
-     {"use_mxfp8": True, **_msd(5)}),
+    (11, "MXFP8_MSD_B8",    "MXFP8 + MSD B=8",
+     {"use_mxfp8": True, **_msd(8)}),
 
     (12, "MXFP8_MSD_B6",    "MXFP8 + MSD B=6",
      {"use_mxfp8": True, **_msd(6)}),
