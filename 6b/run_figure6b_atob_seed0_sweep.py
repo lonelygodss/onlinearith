@@ -852,7 +852,7 @@ def _find_largest_quant_run(runs: list[RunSpec]) -> RunSpec:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Figure 6(b) AtoB seed0 wider sweep runner")
     parser.add_argument("--output-root", type=str, default=str(OUTPUT_ROOT_DEFAULT),
-                        help="Artifact root (default: /home/xzj/coding/6b/atob_seed0_sweep)")
+                        help="Artifact root (default: workspace_root/6b/atob_seed0_sweep)")
     parser.add_argument("--target-snr", type=float, default=15.0,
                         help="Fixed operating point in dB (default: 15).")
     parser.add_argument("--size-percents", type=str, default=DEFAULT_SIZE_PERCENTS,

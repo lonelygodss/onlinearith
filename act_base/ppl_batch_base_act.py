@@ -27,7 +27,7 @@ Todo: Add autmatic load ballancing before the batch run, detect which gpus are f
 assign more setups to them.  For now, just assign round-robin and let the user manually re-run any stragglers.
 
 Usage:
-    cd /home/xzj/coding/onlinearith
+    cd /path/to/onlinearith
     python act_base/ppl_batch_base_act.py --nproc 8                             # run all setups
     python act_base/ppl_batch_base_act.py --nproc 8 --list                      # list setups (rank 0)
     python act_base/ppl_batch_base_act.py --nproc 8 --only 1 6 10               # run only selected

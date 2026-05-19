@@ -37,6 +37,22 @@ Active modified Transformers files:
 - `msd_perf_stats.py`: performance-statistics accumulator.
 - `modular_qwen3.py`: do not edit or regenerate from this during cleanup unless explicitly requested. If the converter is used later, compare the generated `modeling_qwen3.py` carefully and reapply documented manual fixes.
 
+## Environment
+
+Use the parent-directory virtualenv for local commands:
+
+```bash
+source ../.venv3_10/bin/activate
+```
+
+If the shell is not activated, run commands explicitly through:
+
+```bash
+../.venv3_10/bin/python <script>.py
+```
+
+The expected local Transformers source is `../transformers/src`. Prefer `PYTHONPATH="$(pwd)/../transformers/src:${PYTHONPATH}"` or a script-local relative bootstrap over any absolute machine-specific path.
+
 ## Cleanup scope and non-goals
 
 The immediate task is repository cleanup and migration from Claude Code guidance to Codex guidance. Do not implement the Qwen3-8B OOM fixes during cleanup unless the user explicitly asks.
@@ -96,11 +112,11 @@ The current cleanup should prepare for, but not implement, these later changes:
 Run the cheapest relevant checks after cleanup edits:
 
 ```bash
-python ppltest.py --list
-python ppl_batch.py --list
-python calibrate.py --list
-python test_mxfp8linear.py
-python test_fixed_sum_optimizer.py
+../.venv3_10/bin/python ppltest.py --list
+../.venv3_10/bin/python ppl_batch.py --list
+../.venv3_10/bin/python calibrate.py --list
+../.venv3_10/bin/python test_mxfp8linear.py
+../.venv3_10/bin/python test_fixed_sum_optimizer.py
 ```
 
 For a smoke PPL check, use a clearly non-final run:

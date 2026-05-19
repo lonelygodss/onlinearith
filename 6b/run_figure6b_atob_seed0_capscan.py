@@ -13,7 +13,7 @@ Primary use:
 2) Optional full finer-grained sweeps on caps that pass preflight.
 
 Example:
-  /home/xzj/coding/.venv3_10/bin/python 6b/run_figure6b_atob_seed0_capscan.py \
+  ../.venv3_10/bin/python 6b/run_figure6b_atob_seed0_capscan.py \
     --scales 2,4,8 \
     --probe-gpus 0,1,2 \
     --full-gpus 0,1,2,3,4,5,6,7 \

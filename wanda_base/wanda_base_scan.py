@@ -12,7 +12,7 @@ Supported modes:
     each run reads/writes distinct files.
 
 Usage:
-    cd /home/xzj/coding/onlinearith
+    cd /path/to/onlinearith
     python wanda_base/wanda_base_scan.py -nm 2:4 1:4 --only 1 --gpu 0
     python wanda_base/wanda_base_scan.py -nm 2:4 1:4 3:8 --force
     python wanda_base/wanda_base_scan.py --num-texts-scan 64 128 256 --only 1 --gpu 0 -n 2 -m 4

@@ -14,18 +14,23 @@ Format-specific extras:
   - FP6 E2M3 / E3M2: FORMAT_MAX switch test
 
 Run from repo root:
-    cd /home/xzjnew/coding
-    python onlinearith/test_mxfp8linear.py
+    cd /path/to/onlinearith
+    ../.venv3_10/bin/python test_mxfp8linear.py
 """
 
 import sys
 import math
+from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-sys.path.insert(0, "/home/xzjnew/coding/transformers/src")
-from transformers.models.qwen3.modular_qwen3 import (
+REPO_ROOT = Path(__file__).resolve().parent
+TRANSFORMERS_SRC = (REPO_ROOT / ".." / "transformers" / "src").resolve()
+if TRANSFORMERS_SRC.exists():
+    sys.path.insert(0, str(TRANSFORMERS_SRC))
+
+from transformers.models.qwen3.modeling_qwen3 import (
     MXFP8Linear, MXFP4Linear, MXFP6Linear,
     _FP8_E4M3_MAX, _FP4_E2M1_MAX, _FP6_E2M3_MAX, _FP6_E3M2_MAX,
     _FP4_E2M1_GRID_LIST, _FP6_E2M3_GRID_LIST, _FP6_E3M2_GRID_LIST,

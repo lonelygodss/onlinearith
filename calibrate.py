@@ -18,8 +18,8 @@ result file independently (no inter-rank communication during calibration).
 Output files:  calibration_{tag}.json  (e.g. calibration_MXFP8.json)
 
 Usage:
-    cd /home/xzj/coding/onlinearith
-    source /home/xzj/coding/.venv3_10/bin/activate
+    cd /path/to/onlinearith
+    source ../.venv3_10/bin/activate
 
     python calibrate.py --list                                # list setups
     python calibrate.py --setup 1                             # single format

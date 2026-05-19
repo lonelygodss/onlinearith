@@ -7,7 +7,7 @@ Figure 6(b) matrix, and (optionally) executes runs by reusing calibrate.py and
 ppltest.py without introducing a new calibration/evaluation process.
 
 Default behavior:
-  - Prepare manifests + run matrix under /home/xzj/coding/6b
+  - Prepare manifests + run matrix under the workspace-level 6b directory
   - Write preflight OOM estimates
   - Do not execute heavy runs unless --execute is provided
 
@@ -847,7 +847,7 @@ def _write_preflight(
 def main() -> int:
     parser = argparse.ArgumentParser(description="Figure 6(b) stage-D runner")
     parser.add_argument("--output-root", type=str, default=str(OUTPUT_ROOT_DEFAULT),
-                        help="Artifact root (default: /home/xzj/coding/6b)")
+                        help="Artifact root (default: workspace_root/6b)")
     parser.add_argument("--target-snr", type=float, default=27.0,
                         help="Fixed gamma* operating point in dB (default: 27).")
     parser.add_argument("--gpus", type=str, default=None,

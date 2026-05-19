@@ -8,8 +8,8 @@ Loads a calibration_{tag}.json file and produces diagnostic charts showing:
 No model loading required — operates purely on the saved calibration JSON.
 
 Usage:
-    cd /home/xzj/coding/onlinearith
-    source /home/xzj/coding/.venv3_10/bin/activate
+    cd /path/to/onlinearith
+    source ../.venv3_10/bin/activate
 
     python calibration_viz.py calibration_MXFP8.json
     python calibration_viz.py calibration_MXFP8.json --output-dir calib_charts/

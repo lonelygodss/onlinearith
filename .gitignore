@@ -1,4 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Local environments
+.venv/
+venv/
+.env
+.env.*
+.agents/
+.claude/
+.codex/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+nohup.out
+*.swp
+.DS_Store
+
+# Experiment outputs
+ppl_results_*.json
+ppl_batch_summary.json
+qwen3_benchmark_results.json
+benchmark_results*.json
+calibration_*.json
+calibration_base_*.pt
+*.pt
+*.pth
+*.safetensors
+
+# Output directories
 calib_charts/
 calib_data/
 calib_data_base/
 truncate_in_binary_result/
+results/
+outputs/
+plots/
+figures/generated/
+
+# Local shared data/model dirs
+../data/
+../Qwen3-*/
+models/
+checkpoints/

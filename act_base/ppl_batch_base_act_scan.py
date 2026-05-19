@@ -2,7 +2,7 @@
 Run activation-only n:m PPL batches over multiple (n, m) pairs.
 
 Usage:
-    cd /home/xzj/coding/onlinearith
+    cd /path/to/onlinearith
     python act_base/ppl_batch_base_act_scan.py -nm 2:4 1:4 --only 1
     python act_base/ppl_batch_base_act_scan.py -nm 2:4 1:4 --only 1 --gpu 0
     python act_base/ppl_batch_base_act_scan.py --nm "(2,4)" "(1,4)" --force

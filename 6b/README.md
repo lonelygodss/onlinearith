@@ -53,7 +53,7 @@ Quantized held-out runs:
 
 All generated artifacts are written to:
 
-- `/home/xzj/coding/6b`
+- the workspace-level `6b/` directory
 
 Key files:
 
@@ -72,15 +72,15 @@ Key files:
 Prepare manifests and matrix only:
 
 ```bash
-cd /home/xzj/coding
-source /home/xzj/coding/.venv3_10/bin/activate
-python onlinearith/6b/run_figure6b.py
+cd /path/to/onlinearith
+source ../.venv3_10/bin/activate
+python 6b/run_figure6b.py
 ```
 
 Disable calibration token cap (not recommended unless memory is validated):
 
 ```bash
-python onlinearith/6b/run_figure6b.py --max-cal-tokens-per-split 0
+python 6b/run_figure6b.py --max-cal-tokens-per-split 0
 ```
 
 Match original calibrate default volume style explicitly:
