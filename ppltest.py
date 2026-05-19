@@ -75,7 +75,7 @@ from experiment_config import (
 )
 
 # ── Config ────────────────────────────────────────────────────────────────────
-MODEL_PATH  = "../Qwen3-0.6B"
+MODEL_PATH  = "../Qwen3-8B"
 DATASET     = ("wikitext", "wikitext-2-raw-v1", "test")   # (name, config, split)
 MAX_LENGTH  = 4096   # max context window fed to the model
 STRIDE      = 512    # sliding-window stride (<= MAX_LENGTH)

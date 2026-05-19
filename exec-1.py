@@ -48,7 +48,7 @@ class CommandSpec:
 # Each entry uses COMMON_PREFIX/COMMON_SUFFIX unless overridden.
 COMMANDS: Sequence[CommandSpec] = (
     CommandSpec("echo hello"),
-    CommandSpec("python ppltest.py --nproc 1 --setup 6 --calibration ../data/calib-data/13db/calibration_MXFP8_fixed_sum.json --lite --output ../data/calib-data/13db/ppl_results_MXFP8_fix_time.json --limit-samples 100 --figure5-layer-cycles --gpus 5"),
+    CommandSpec("python ppltest.py --nproc 4 --setup 2 --output "),
     CommandSpec('python ppltest.py --nproc 1 --setup 6 --calibration ../data/calib-data/16db/calibration_MXFP8_fixed_sum.json --lite --output ../data/calib-data/16db/ppl_results_MXFP8_fix_time.json --limit-samples 100 --figure5-layer-cycles --gpus 5'),
     CommandSpec('python ppltest.py --nproc 1 --setup 6 --calibration ../data/calib-data/26db/calibration_MXFP8_fixed_sum.json --lite --output ../data/calib-data/26db/ppl_results_MXFP8_fix_time.json --limit-samples 100 --figure5-layer-cycles --gpus 5'),
     # CommandSpec("python eval.py", suffix="--batch_size 8"),
