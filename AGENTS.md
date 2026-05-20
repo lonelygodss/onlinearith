@@ -38,7 +38,7 @@ Active modified Transformers files:
 - `configuration_qwen3.py`: custom MXFP/MSD config fields.
 - `calibration_msd.py`: calibration implementation imported by `calibrate.py`.
 - `msd_perf_stats.py`: performance-statistics accumulator.
-- `modular_qwen3.py`: do not edit or regenerate from this during cleanup unless explicitly requested. If the converter is used later, compare the generated `modeling_qwen3.py` carefully and reapply documented manual fixes.
+- `modular_qwen3.py`: reference/modular source only. Do not edit or regenerate from this unless explicitly requested. If the converter is used later, compare the generated `modeling_qwen3.py` carefully and reapply documented manual fixes.
 
 ## Environment
 
@@ -56,27 +56,13 @@ If the shell is not activated, run commands explicitly through:
 
 The expected local Transformers source is `../transformers/src`. Prefer `PYTHONPATH="$(pwd)/../transformers/src:${PYTHONPATH}"` or a script-local relative bootstrap over any absolute machine-specific path.
 
-## Cleanup scope and non-goals
-
-The immediate task is repository cleanup and migration from Claude Code guidance to Codex guidance. Do not implement the Qwen3-8B OOM fixes during cleanup unless the user explicitly asks.
-
-Allowed cleanup work:
-
-- Replace `CLAUDE.md` with this `AGENTS.md` and remove stale Claude-specific guidance after verification.
-- Expand `.gitignore` for caches, generated results, calibration outputs, plots, temporary logs, and model/output artifacts.
-- Remove tracked generated artifacts such as `__pycache__/` and transient result JSON files from git tracking.
-- Move old notes into `docs/` or `docs/archive/` without changing code behavior.
-- Make README and docs reflect the current active scripts, setup IDs, and authoritative source files.
-- Remove hardcoded local absolute paths from tests and helper scripts.
-- Rename or relocate tests only with thin compatibility wrappers or clear command updates.
-
-Non-goals during cleanup:
+## Standing non-goals
 
 - Do not reduce `MAX_LENGTH`, increase `STRIDE`, truncate the dataset, change the tokenizer, or change loss weighting to avoid OOM.
 - Do not change setup IDs, result JSON schema, calibration JSON schema, or default file names unless you add backward-compatible aliases.
-- Do not change MX quantization math, MSD truncation math, calibration semantics, or PPL window semantics.
-- Do not delete deep-pipeline code paths unless the user explicitly approves. It is acceptable to label them archived/abandoned and exclude them from default workflows.
-- Do not silently switch from single-GPU data parallel behavior to `device_map="auto"` during cleanup. That belongs to the later OOM-fix task.
+- Do not change MX quantization math, MSD truncation math, calibration semantics, or PPL window semantics unless explicitly asked.
+- Do not delete deep-pipeline code paths unless explicitly approved. It is acceptable to leave them archived/abandoned and exclude them from default workflows.
+- Do not silently switch from single-GPU data parallel behavior to `device_map="auto"`. Model sharding must be explicit.
 
 ## PPL invariants
 
@@ -98,7 +84,7 @@ The active iteration is initialized from `docs/cim_oom_harness/CODEX_OOM_PERF_PL
 2. Keep `--lite` or stats-disable controls separate from numerical PPL. Lite stats should only skip expensive performance-statistics details.
 3. Force `use_cache=False` for PPL.
 4. Use `logits_to_keep=trg_len+1` plus sliced labels only after verifying loss equality on small windows.
-5. For Qwen3-8B, avoid 8 data-parallel full model replicas. Model sharding is a later functional change, not cleanup.
+5. For Qwen3-8B, avoid 8 data-parallel full model replicas. Model sharding is a later explicit functional change.
 
 ## Coding conventions
 
@@ -112,7 +98,7 @@ The active iteration is initialized from `docs/cim_oom_harness/CODEX_OOM_PERF_PL
 
 ## Verification commands
 
-Run the cheapest relevant checks after cleanup edits:
+Run the cheapest relevant checks after repo or runner edits:
 
 ```bash
 ../.venv3_10/bin/python ppltest.py --list
@@ -136,17 +122,4 @@ python test_distributed.py
 torchrun --nproc_per_node=2 test_distributed.py
 ```
 
-Do not run full PPL or full calibration by default during cleanup. They are long jobs and not needed to validate file organization or docs.
-
-## Done definition for cleanup
-
-Cleanup is done when:
-
-- `AGENTS.md` is present at repo root and `CLAUDE.md` is removed or explicitly marked obsolete.
-- README states the current authoritative code path and active workflows.
-- `.gitignore` covers caches, generated results, calibration outputs, plots, and local model/data artifacts.
-- Tracked generated files are removed from git tracking.
-- Active scripts still run with their old commands.
-- Tests no longer rely on hardcoded personal absolute paths.
-- No PPL methodology constants or setup IDs changed unintentionally.
-- The repository is ready for the next task: exact chunked MX baseline and lite/full stats separation.
+Do not run full PPL or full calibration by default. They are long jobs and should be run only when the requested task needs final metrics.

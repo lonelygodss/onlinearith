@@ -1,9 +1,6 @@
-# Codex Cleanup Status
+# Codex Quality Gates
 
-The behavior-preserving cleanup pass is complete. One-off prompt, plan, and
-continuation scaffolding has been removed.
-
-Reusable cleanup gates remain in normal repo paths:
+Reusable repo checks live in normal repo paths:
 
 ```text
 onlinearith/
@@ -24,6 +21,3 @@ bash scripts/run_repo_quality_gate.sh
 The contract tests intentionally avoid loading a real Qwen3 model. They are
 contract and structure checks, not PPL benchmarks. If `pytest` is not installed
 in the project environment, `run_repo_quality_gate.sh` runs them directly.
-
-Next functional work should be the explicitly requested OOM iteration, not more
-cleanup by default.

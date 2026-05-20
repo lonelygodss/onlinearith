@@ -21,7 +21,7 @@ This repository contains evaluation, calibration, distributed helper, plotting, 
 - `tools/probe_mxfp_memory.py`: per-layer MXFP/MSD forward memory probe.
 - `scripts/run_qwen8b_oom_ladder.sh`: staged Qwen3-8B OOM acceptance ladder.
 - `../transformers/src/transformers/models/qwen3/modeling_qwen3.py`: current operational Qwen3 implementation. Patch this file for current MXFP/MSD runtime work unless modular-converter work is explicitly requested.
-- `../transformers/src/transformers/models/qwen3/modular_qwen3.py`: reference/modular source only. Do not regenerate `modeling_qwen3.py` from it during cleanup.
+- `../transformers/src/transformers/models/qwen3/modular_qwen3.py`: reference/modular source only. Do not regenerate `modeling_qwen3.py` from it unless explicitly requested.
 
 ## Setup
 
@@ -84,7 +84,7 @@ Current `--nproc` behavior is data-parallel execution with full model replicas. 
 
 ## Documentation
 
-- Cleanup status and quality gates: `docs/codex/`, `tools/`, `tests/`, and `scripts/run_repo_quality_gate.sh`
+- Codex quality gates: `docs/codex/`, `tools/`, `tests/`, and `scripts/run_repo_quality_gate.sh`
 - Baseline notes: `docs/baselines/`
 - Calibration notes: `docs/calibration/`
 - Developer notes, including modular converter details: `docs/dev/`
@@ -92,7 +92,7 @@ Current `--nproc` behavior is data-parallel execution with full model replicas. 
 
 Deep-pipeline material is archived/abandoned unless explicitly requested. Existing setup IDs are preserved for compatibility, but deep pipeline is not part of the immediate OOM-fix path.
 
-## Next Planned Work
+## Active Work
 
 The active Qwen3-8B OOM/performance iteration is tracked in `docs/cim_oom_harness/CODEX_OOM_PERF_PLAN.md`. Current focus:
 
