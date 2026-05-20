@@ -73,8 +73,7 @@ Current `--nproc` behavior is data-parallel execution with full model replicas. 
 
 ## Documentation
 
-- Cleanup plan and acceptance notes: `docs/cleanup/`
-- Codex cleanup guardrails and quality harness: `docs/codex/`, `tools/`, `tests/`, and `scripts/run_repo_quality_gate.sh`
+- Cleanup status and quality gates: `docs/codex/`, `tools/`, `tests/`, and `scripts/run_repo_quality_gate.sh`
 - Baseline notes: `docs/baselines/`
 - Calibration notes: `docs/calibration/`
 - Developer notes, including modular converter details: `docs/dev/`

@@ -1,16 +1,12 @@
-# Codex Repo-Improvement Harness
+# Codex Cleanup Status
 
-These files steer behavior-preserving cleanup passes for `onlinearith` and the
-sibling `../transformers/src/transformers/models/qwen3/` implementation before
-any CUDA OOM work.
+The behavior-preserving cleanup pass is complete. One-off prompt, plan, and
+continuation scaffolding has been removed.
 
-Integrated placement:
+Reusable cleanup gates remain in normal repo paths:
 
 ```text
 onlinearith/
-  docs/codex/CODEX_NEXT_CODE_CLEANUP_PLAN.md
-  docs/codex/CODEX_GUARDRAILS.md
-  docs/codex/CODEX_PROMPT_CODE_CLEANUP.md
   tools/repo_quality_gate.py
   tools/compare_ppl_math.py
   tests/test_config_contract.py
@@ -19,12 +15,15 @@ onlinearith/
   scripts/run_repo_quality_gate.sh
 ```
 
-Run after Codex changes:
+Verification:
 
 ```bash
-python tools/repo_quality_gate.py --strict
-python -m pytest -q tests/test_config_contract.py tests/test_ppl_window_contract.py tests/test_qwen3_public_api_contract.py
 bash scripts/run_repo_quality_gate.sh
 ```
 
-The tests intentionally avoid loading a real Qwen3 model. They are contract and structure checks, not PPL benchmarks.
+The contract tests intentionally avoid loading a real Qwen3 model. They are
+contract and structure checks, not PPL benchmarks. If `pytest` is not installed
+in the project environment, `run_repo_quality_gate.sh` runs them directly.
+
+Next functional work should be the explicitly requested OOM iteration, not more
+cleanup by default.
