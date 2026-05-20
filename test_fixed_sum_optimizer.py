@@ -15,8 +15,11 @@ from pathlib import Path
 
 import numpy as np
 
-# Add transformers to path
-sys.path.insert(0, str(Path("../transformers/src").resolve()))
+# Add sibling transformers checkout to path when present.
+REPO_ROOT = Path(__file__).resolve().parent
+TRANSFORMERS_SRC = (REPO_ROOT / ".." / "transformers" / "src").resolve()
+if TRANSFORMERS_SRC.exists():
+    sys.path.insert(0, str(TRANSFORMERS_SRC))
 
 from transformers.models.qwen3.calibration_msd import (
     LayerErrorCurves,

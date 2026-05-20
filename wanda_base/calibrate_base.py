@@ -26,6 +26,7 @@ from dist_utils import (
     maybe_relaunch_with_torchrun,
 )
 from experiment_config import apply_config, reconfigure_mlp_layers, reset_to_baseline
+from runtime_paths import describe_missing_model_path, normalize_output_dir
 
 # ── Configuration ──
 # (Format 1-4 cover the MXFP evaluations)
@@ -158,8 +159,14 @@ def main():
         default="",
         help="Optional suffix appended to calibration filenames (shared with ppl_batch_base).",
     )
+    parser.add_argument("--model-path", type=str, default=MODEL_PATH, metavar="DIR",
+                        help=f"Local model directory (default: {MODEL_PATH})")
+    parser.add_argument("--results-root", type=str, default=None, metavar="DIR",
+                        help=f"Root directory for Wanda baseline outputs (default: {WORKSPACE_ROOT / 'data' / 'wanda_base'})")
     
     args, unparsed = parser.parse_known_args()
+    model_path = args.model_path
+    results_root = normalize_output_dir(args.results_root, (WORKSPACE_ROOT / "data" / "wanda_base").resolve())
     output_hook = _normalize_output_hook(args.output_hook)
     if args.output_hook.strip() and not output_hook:
         raise SystemExit("Invalid --output-hook: must contain at least one alphanumeric, '.', '_' or '-'.")
@@ -200,8 +207,7 @@ def main():
 
     my_setups = run_setups[rank::world_size]
 
-    RESULTS_ROOT = (WORKSPACE_ROOT / "data" / "wanda_base").resolve()
-    RESULTS_DIR = RESULTS_ROOT / f"{args.n}-{args.m}"
+    RESULTS_DIR = results_root / f"{args.n}-{args.m}"
     if is_main(rank):
         RESULTS_DIR.mkdir(parents=True, exist_ok=True)
         print(f"World size: {world_size}  |  Device: {device}  |  dtype: {dtype}")
@@ -220,12 +226,18 @@ def main():
     if is_main(rank):
         print("Loading tokenizer & model ...")
 
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, local_files_only=True)
+    if not Path(model_path).exists():
+        if is_main(rank):
+            print(f"Error: {describe_missing_model_path(model_path)}")
+        cleanup_distributed()
+        return
+
+    tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
         
     model = AutoModelForCausalLM.from_pretrained(
-        MODEL_PATH, local_files_only=True, dtype=dtype
+        model_path, local_files_only=True, dtype=dtype
     )
     model.to(device)
 

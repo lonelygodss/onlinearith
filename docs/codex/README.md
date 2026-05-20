@@ -1,9 +1,10 @@
-# Codex repo-improvement harness for onlinearith + transformers/qwen3
+# Codex Repo-Improvement Harness
 
-Drop this directory into the root of `onlinearith`, or copy the individual files into matching paths.
-The files are designed to steer Codex toward a behavior-preserving cleanup pass before any CUDA OOM work.
+These files steer behavior-preserving cleanup passes for `onlinearith` and the
+sibling `../transformers/src/transformers/models/qwen3/` implementation before
+any CUDA OOM work.
 
-Suggested placement:
+Integrated placement:
 
 ```text
 onlinearith/

@@ -83,6 +83,7 @@ from experiment_config import (
     format_config_banner,peak_memory_str,
     reset_peak_memory,
 )
+from runtime_paths import describe_missing_model_path, normalize_output_dir
 
 # Re-export for backward compatibility (calibrate.py, ppltest.py may import these)
 _BASELINE_OVERRIDES = BASELINE_CONFIG
@@ -212,6 +213,8 @@ def run_complete_mode(args):
             cmd.extend(["--nproc", str(args.nproc)])
         if args.gpus is not None:
             cmd.extend(["--gpus", args.gpus])
+        cmd.extend(["--model-path", MODEL_PATH])
+        cmd.extend(["--results-root", str(RESULTS_ROOT)])
         if args.force:
             cmd.append("--force")
         if args.only:
@@ -239,6 +242,7 @@ def run_complete_mode(args):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
+    global MODEL_PATH, RESULTS_ROOT, RESULTS_DIR
     parser = argparse.ArgumentParser(description="Batch PPL evaluation for activation-only n:m sparsity")
     parser.add_argument("--complete", action="store_true",
                         help="Run all discovered n-m cases serially (one ppl_batch_base run per case).")
@@ -256,7 +260,13 @@ def main():
     parser.add_argument("--gpus", type=str, default=None,
                         help="Comma-separated physical GPU IDs to use, e.g. '4,5,6,7'. "
                              "Must match --nproc (or --nproc_per_node if using torchrun).")
+    parser.add_argument("--model-path", type=str, default=MODEL_PATH, metavar="DIR",
+                        help=f"Local model directory (default: {MODEL_PATH})")
+    parser.add_argument("--results-root", type=str, default=None, metavar="DIR",
+                        help=f"Root directory containing n-m result directories (default: {RESULTS_ROOT})")
     args = parser.parse_args()
+    MODEL_PATH = args.model_path
+    RESULTS_ROOT = normalize_output_dir(args.results_root, RESULTS_ROOT)
 
     if args.m <= 0:
         raise SystemExit("ERROR: -m must be > 0.")
@@ -273,9 +283,7 @@ def main():
 
     restrict_gpus(args.gpus)
     maybe_relaunch_with_torchrun(args.nproc)
-    global RESULTS_DIR
     RESULTS_DIR = RESULTS_ROOT / f"{args.n}-{args.m}"
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
     # ── Distributed init (no NCCL — ranks work independently) ──
     rank, world_size, local_rank, device = init_distributed_lite()
@@ -293,6 +301,8 @@ def main():
                 print(f"{sid:3d}  {tag:<30}  {desc}{exists}")
         cleanup_distributed()
         return
+
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
     # ── Filter setups ──
     if args.only:
@@ -318,6 +328,12 @@ def main():
     # ── Device & model ──
     if is_main(rank):
         print("Loading tokenizer & model ...")
+
+    if not Path(MODEL_PATH).exists():
+        if is_main(rank):
+            print(f"Error: {describe_missing_model_path(MODEL_PATH)}")
+        cleanup_distributed()
+        return
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, local_files_only=True)
     model_kwargs = {"local_files_only": True, "dtype": dtype}

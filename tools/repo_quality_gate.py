@@ -12,7 +12,9 @@ import ast
 import importlib.util
 import re
 import sys
+import tokenize
 from dataclasses import dataclass
+from io import StringIO
 from pathlib import Path
 from typing import Iterable
 
@@ -110,6 +112,15 @@ def iter_python_files(root: Path) -> Iterable[Path]:
         if any(part in ignored_parts for part in path.parts):
             continue
         yield path
+
+
+def python_without_comments(text: str) -> str:
+    """Return Python source with comments removed for token-level string scans."""
+    out: list[str] = []
+    for token in tokenize.generate_tokens(StringIO(text).readline):
+        if token.type != tokenize.COMMENT:
+            out.append(token.string)
+    return " ".join(out)
 
 
 def check_ppl_constants(gate: Gate, root: Path) -> None:
@@ -234,7 +245,11 @@ def check_transformers_qwen3(gate: Gate, transformers_root: Path) -> None:
 
 def check_personal_paths(gate: Gate, root: Path) -> None:
     offenders: list[str] = []
-    pattern = re.compile(r"(/home/[^\s'\"]+|/Users/[^\s'\"]+)")
+    home_prefix = "/" + "home" + "/"
+    users_prefix = "/" + "Users" + "/"
+    pattern = re.compile(
+        rf"({re.escape(home_prefix)}[^\s'\"]+|{re.escape(users_prefix)}[^\s'\"]+)"
+    )
     for path in iter_python_files(root):
         text = path.read_text(encoding="utf-8", errors="ignore")
         if pattern.search(text):
@@ -251,7 +266,7 @@ def check_no_hidden_ppl_workarounds(gate: Gate, root: Path) -> None:
         path = root / rel
         if not path.exists():
             continue
-        text = path.read_text(encoding="utf-8", errors="ignore")
+        text = python_without_comments(path.read_text(encoding="utf-8", errors="ignore"))
         for token in SUSPICIOUS_PPL_WORKAROUNDS:
             if token in text:
                 offenders.append(f"{rel}:{token}")

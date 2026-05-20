@@ -73,36 +73,16 @@ from experiment_config import (
     reset_peak_memory,
     reset_to_baseline,
 )
+from ppl_utils import accumulate_weighted_nll, mask_context_labels, precompute_windows
+from runtime_paths import default_model_path, describe_missing_model_path, normalize_output_dir
 
 # ── Config ────────────────────────────────────────────────────────────────────
-MODEL_PATH  = "../Qwen3-8B"
+MODEL_PATH  = default_model_path("Qwen3-8B")
 DATASET     = ("wikitext", "wikitext-2-raw-v1", "test")   # (name, config, split)
 MAX_LENGTH  = 4096   # max context window fed to the model
 STRIDE      = 512    # sliding-window stride (<= MAX_LENGTH)
 RESULTS_OUT = "ppl_results_MXFP8_MSD_B16.json"
 RESULTS_ROOT = Path("../data/calib-data")
-
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-def precompute_windows(seq_len: int, max_length: int, stride: int):
-    """
-    Pre-compute all sliding windows as a list of (begin_loc, end_loc, trg_len).
-
-    trg_len is the number of *newly scored* tokens in each window
-    (tokens not masked by the -100 label).
-    """
-    windows = []
-    prev_end_loc = 0
-    for begin_loc in range(0, seq_len, stride):
-        end_loc = min(begin_loc + max_length, seq_len)
-        trg_len = end_loc - prev_end_loc
-        windows.append((begin_loc, end_loc, trg_len))
-        prev_end_loc = end_loc
-        if end_loc == seq_len:
-            break
-    return windows
-
 
 def _load_text_manifest(manifest_path: Path) -> list[str]:
     """
@@ -192,6 +172,10 @@ calibration workflow:
                         help="Override output JSON filename "
                              "(default: auto-generated from setup tag, "
                              "or RESULTS_OUT constant if --setup is not used)")
+    parser.add_argument("--model-path", type=str, default=MODEL_PATH, metavar="DIR",
+                        help=f"Local model directory (default: {MODEL_PATH})")
+    parser.add_argument("--results-dir", type=str, default=None, metavar="DIR",
+                        help=f"Directory for auto-generated result JSON files (default: {RESULTS_ROOT})")
     parser.add_argument("--calibration", type=str, default=None, metavar="FILE",
                         help="Path to calibration JSON file (produced by calibrate.py). "
                              "Injects per-channel B_base budgets into the model config, "
@@ -219,6 +203,8 @@ calibration workflow:
                              "Records per-layer cycle moments from block-serial, "
                              "channel-parallel execution estimates.")
     args = parser.parse_args()
+    model_path = args.model_path
+    results_root = normalize_output_dir(args.results_dir, RESULTS_ROOT)
 
     auto_enabled_lite = args.figure5_layer_cycles and not args.lite
     if auto_enabled_lite:
@@ -228,8 +214,9 @@ calibration workflow:
     if args.list:
         print(f"{'ID':>3}  {'Tag':<30}  Description")
         print("-" * 75)
+        list_results_dir = results_root if args.results_dir is not None else Path(__file__).parent
         for sid, tag, desc, _ in SETUPS:
-            result_file = Path(__file__).parent / f"ppl_results_{tag}.json"
+            result_file = list_results_dir / f"ppl_results_{tag}.json"
             exists = "  (done)" if result_file.exists() else ""
             print(f"{sid:3d}  {tag:<30}  {desc}{exists}")
         return
@@ -275,18 +262,23 @@ calibration workflow:
     if is_main(rank):
         print("Loading tokenizer & model ...")
 
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, local_files_only=True)
+    if not Path(model_path).exists():
+        print(f"Error: {describe_missing_model_path(model_path)}")
+        cleanup_distributed()
+        return
+
+    tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
 
     model_kwargs: dict = {"local_files_only": True, "dtype": dtype}
     # Each rank loads onto its own GPU -- no device_map="auto"
-    model = AutoModelForCausalLM.from_pretrained(MODEL_PATH, **model_kwargs)
+    model = AutoModelForCausalLM.from_pretrained(model_path, **model_kwargs)
     model.to(device)
     model.eval()
     reset_peak_memory(device)
 
     if is_main(rank):
         num_params = sum(p.numel() for p in model.parameters())
-        print(f"Model: {MODEL_PATH}  |  Params: {num_params/1e6:.1f}M")
+        print(f"Model: {model_path}  |  Params: {num_params/1e6:.1f}M")
 
     # ── 3. Apply setup config (if --setup given) ─────────────────────────────
     if selected_setup is not None:
@@ -340,7 +332,7 @@ calibration workflow:
     elif selected_setup is not None:
         tag = selected_setup[1]
         calib_suffix = "_calib" if cal_data_dict is not None else ""
-        results_dir = cal_path.parent if cal_data_dict is not None else RESULTS_ROOT
+        results_dir = cal_path.parent if cal_data_dict is not None else results_root
         results_out = results_dir / f"ppl_results_{tag}{calib_suffix}.json"
     else:
         results_out = RESULTS_OUT
@@ -431,16 +423,16 @@ calibration workflow:
     iterator = tqdm(my_windows, desc=f"[rank {rank}] PPL windows", disable=not is_main(rank))
     for win_idx, (begin_loc, end_loc, trg_len, is_dummy) in enumerate(iterator):
         input_ids  = encodings.input_ids[:, begin_loc:end_loc].to(device)
-        target_ids = input_ids.clone()
-        target_ids[:, :-trg_len] = -100
+        target_ids = mask_context_labels(input_ids, trg_len)
 
         with torch.no_grad():
             outputs = model(input_ids, labels=target_ids)
             avg_nll = outputs.loss.item()
 
         if not is_dummy:
-            local_nll_sum  += avg_nll * trg_len
-            local_tokens   += trg_len
+            local_nll_sum, local_tokens = accumulate_weighted_nll(
+                local_nll_sum, local_tokens, avg_nll, trg_len
+            )
             local_chunk_nlls.append(avg_nll)
 
         # Free tensors and periodically release cached memory to prevent OOM
@@ -493,7 +485,7 @@ calibration workflow:
         print(f"{'PERPLEXITY EVALUATION RESULTS':^52}")
         print(SEP)
         print(f"  Dataset          : {dataset_display}")
-        print(f"  Model            : {MODEL_PATH}")
+        print(f"  Model            : {model_path}")
         print(f"  Scored tokens    : {total_tokens:,}  (stride={STRIDE})")
         print(f"  GPUs used        : {world_size}")
         print(SEP)
@@ -513,7 +505,7 @@ calibration workflow:
         print(SEP)
 
         results = {
-            "model": MODEL_PATH,
+            "model": model_path,
             "dataset": dataset_label,
             "config": {"max_length": MAX_LENGTH, "stride": STRIDE, "dtype": str(dtype),
                        "world_size": world_size,
@@ -632,6 +624,7 @@ calibration workflow:
                 print(SEP)
 
         out_path = Path(__file__).parent / results_out
+        out_path.parent.mkdir(parents=True, exist_ok=True)
         with open(out_path, "w") as f:
             json.dump(results, f, indent=2)
         print(f"\nResults saved -> {out_path}")

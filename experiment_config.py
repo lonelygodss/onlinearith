@@ -19,40 +19,18 @@ from __future__ import annotations
 
 import torch
 
-# ── All custom MXFP / MSD config field names ────────────────────────────────
-# These are the fields added to Qwen3Config beyond the standard HuggingFace
-# fields.  Used for snapshotting, resetting, and diffing.
+# ── All custom MXFP / MSD config fields ─────────────────────────────────────
+# These are the fields added to Qwen3Config beyond standard HuggingFace fields.
+# They are used for setup validation, snapshotting, resetting, and diffing.
 
-MXFP_MSD_FIELDS: list[str] = [
-    # MXFP format selection (mutually exclusive: at most one True)
-    "use_mxfp8",
-    "mxfp8_block_size",
-    "use_mxfp6",
-    "mxfp6_block_size",
-    "mxfp6_format",         # "e2m3" or "e3m2"
-    "use_mxfp4",
-    "mxfp4_block_size",
-    # Activation-only structured sparsity
-    "use_activation_nm_sparsity",
-    "activation_nm_n",
-    "activation_nm_m",
-    # MSD truncation
-    "use_msd_truncation",
-    "msd_cycle_budget",
-    "msd_online_delay",
-    "msd_budget_dynamic_scale",
-    "msd_budget_dynamic_threshold",
-    "msd_budget_dynamic_mode",
-    "msd_deep_pipeline",
-    "msd_pipeline_precision_loss",
-    "msd_calibration_data",
-    "msd_chunk_target_mib",
+MXFP_FORMAT_FLAGS: tuple[str, ...] = ("use_mxfp8", "use_mxfp6", "use_mxfp4")
+MSD_RUNTIME_STATS_FIELDS: tuple[str, ...] = (
+    "msd_perf_stats_enabled",
+    "msd_perf_stats_lite",
     "msd_figure5_layer_cycles",
-]
+)
 
-# ── Baseline config: everything off, all fields at their Qwen3Config defaults
-# Applying this dict resets the model to a clean FP16 state.
-BASELINE_CONFIG: dict = {
+CUSTOM_QWEN3_CONFIG_DEFAULTS: dict = {
     "use_mxfp8": False,
     "mxfp8_block_size": 32,
     "use_mxfp6": False,
@@ -72,9 +50,18 @@ BASELINE_CONFIG: dict = {
     "msd_deep_pipeline": False,
     "msd_pipeline_precision_loss": 2,
     "msd_calibration_data": None,
+    # Onlinearith experiment default. Qwen3Config's constructor default remains
+    # 512 MiB for upstream-compatible standalone model construction.
     "msd_chunk_target_mib": 1536,
+    "msd_perf_stats_enabled": True,
+    "msd_perf_stats_lite": False,
     "msd_figure5_layer_cycles": False,
 }
+
+MXFP_MSD_FIELDS: list[str] = list(CUSTOM_QWEN3_CONFIG_DEFAULTS)
+
+# Applying this dict resets the model to the onlinearith FP16 baseline state.
+BASELINE_CONFIG: dict = dict(CUSTOM_QWEN3_CONFIG_DEFAULTS)
 
 
 # ── MSD convenience defaults & helper ────────────────────────────────────────
@@ -89,6 +76,8 @@ _MSD_DEFAULTS: dict = {
     "msd_deep_pipeline": False,
     "msd_pipeline_precision_loss": 2,
     "msd_calibration_data": None,
+    "msd_perf_stats_enabled": True,
+    "msd_perf_stats_lite": False,
     "msd_figure5_layer_cycles": False,
 }
 
@@ -171,6 +160,69 @@ SETUPS: list[tuple[int, str, str, dict]] = [
     (21, "MXFP4_MSD_B16_pipeline", "MXFP4 + MSD B=16 + pipeline",
      {"use_mxfp4": True, **_msd(16, pipeline=True)}),
 ]
+
+
+def _require_positive_int(name: str, value: object, setup_id: int, tag: str) -> None:
+    if not isinstance(value, int) or value <= 0:
+        raise ValueError(f"Setup {setup_id}/{tag}: {name} must be a positive integer, got {value!r}")
+
+
+def validate_setup_definition(setup: tuple[int, str, str, dict]) -> None:
+    """Validate one setup tuple against the registered custom config fields."""
+    if not (isinstance(setup, tuple) and len(setup) == 4):
+        raise ValueError(f"Invalid setup tuple shape: {setup!r}")
+
+    setup_id, tag, description, overrides = setup
+    if not isinstance(setup_id, int):
+        raise ValueError(f"Setup id must be an int, got {setup_id!r}")
+    if not isinstance(tag, str) or not tag:
+        raise ValueError(f"Setup {setup_id}: tag must be a non-empty string")
+    if not isinstance(description, str) or not description:
+        raise ValueError(f"Setup {setup_id}/{tag}: description must be a non-empty string")
+    if not isinstance(overrides, dict):
+        raise ValueError(f"Setup {setup_id}/{tag}: overrides must be a dict")
+
+    unknown = sorted(set(overrides) - set(BASELINE_CONFIG))
+    if unknown:
+        raise ValueError(f"Setup {setup_id}/{tag}: unknown override keys {unknown}")
+
+    active_config = dict(BASELINE_CONFIG)
+    active_config.update(overrides)
+    enabled_formats = [flag for flag in MXFP_FORMAT_FLAGS if bool(active_config.get(flag))]
+    if len(enabled_formats) > 1:
+        raise ValueError(f"Setup {setup_id}/{tag}: MX format flags are mutually exclusive, got {enabled_formats}")
+
+    if active_config["mxfp6_format"] not in {"e2m3", "e3m2"}:
+        raise ValueError(f"Setup {setup_id}/{tag}: mxfp6_format must be 'e2m3' or 'e3m2'")
+
+    for field in ("mxfp8_block_size", "mxfp6_block_size", "mxfp4_block_size"):
+        _require_positive_int(field, active_config[field], setup_id, tag)
+
+    if active_config["use_activation_nm_sparsity"]:
+        _require_positive_int("activation_nm_n", active_config["activation_nm_n"], setup_id, tag)
+        _require_positive_int("activation_nm_m", active_config["activation_nm_m"], setup_id, tag)
+        if active_config["activation_nm_n"] > active_config["activation_nm_m"]:
+            raise ValueError(f"Setup {setup_id}/{tag}: activation_nm_n must be <= activation_nm_m")
+
+    if active_config["use_msd_truncation"]:
+        for field in ("msd_cycle_budget", "msd_online_delay", "msd_pipeline_precision_loss"):
+            _require_positive_int(field, active_config[field], setup_id, tag)
+    _require_positive_int("msd_chunk_target_mib", active_config["msd_chunk_target_mib"], setup_id, tag)
+
+
+def validate_all_setups(setups: list[tuple[int, str, str, dict]] = SETUPS) -> None:
+    """Validate uniqueness and per-setup override contracts."""
+    ids = [setup[0] for setup in setups]
+    tags = [setup[1] for setup in setups]
+    if len(ids) != len(set(ids)):
+        raise ValueError("Setup IDs must be unique")
+    if len(tags) != len(set(tags)):
+        raise ValueError("Setup tags must be unique")
+    for setup in setups:
+        validate_setup_definition(setup)
+
+
+validate_all_setups()
 
 
 # ── Config application utilities ─────────────────────────────────────────────

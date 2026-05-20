@@ -69,12 +69,14 @@ from experiment_config import (
     reset_peak_memory,
     reset_to_baseline,
 )
+from ppl_utils import accumulate_weighted_nll, mask_context_labels, precompute_windows
+from runtime_paths import default_model_path, describe_missing_model_path, normalize_output_dir
 
 # Re-export for backward compatibility (calibrate.py, ppltest.py may import these)
 _BASELINE_OVERRIDES = BASELINE_CONFIG
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-MODEL_PATH  = "../Qwen3-0.6B"
+MODEL_PATH  = default_model_path("Qwen3-0.6B")
 DATASET     = ("wikitext", "wikitext-2-raw-v1", "test")
 MAX_LENGTH  = 4096
 STRIDE      = 512
@@ -92,29 +94,22 @@ def evaluate_ppl(model, encodings, device, seq_len, num_words, num_chars, num_by
     total_nll_sum = 0.0
     total_tokens  = 0
     per_chunk_nlls = []
-    prev_end_loc = 0
     t_start = time.perf_counter()
+    windows = precompute_windows(seq_len, MAX_LENGTH, STRIDE)
 
-    for begin_loc in tqdm(range(0, seq_len, STRIDE), desc="  PPL windows",
-                          leave=False, disable=not show_progress):
-        end_loc = min(begin_loc + MAX_LENGTH, seq_len)
-        trg_len = end_loc - prev_end_loc
-
+    for begin_loc, end_loc, trg_len in tqdm(windows, desc="  PPL windows",
+                                            leave=False, disable=not show_progress):
         input_ids  = encodings.input_ids[:, begin_loc:end_loc].to(device)
-        target_ids = input_ids.clone()
-        target_ids[:, :-trg_len] = -100
+        target_ids = mask_context_labels(input_ids, trg_len)
 
         with torch.no_grad():
             outputs = model(input_ids, labels=target_ids)
             avg_nll = outputs.loss.item()
 
-        total_nll_sum += avg_nll * trg_len
-        total_tokens  += trg_len
+        total_nll_sum, total_tokens = accumulate_weighted_nll(
+            total_nll_sum, total_tokens, avg_nll, trg_len
+        )
         per_chunk_nlls.append(avg_nll)
-
-        prev_end_loc = end_loc
-        if end_loc == seq_len:
-            break
 
     elapsed  = time.perf_counter() - t_start
     mean_nll = total_nll_sum / total_tokens
@@ -151,6 +146,7 @@ def evaluate_ppl(model, encodings, device, seq_len, num_words, num_chars, num_by
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
+    global MODEL_PATH, RESULTS_DIR
     parser = argparse.ArgumentParser(description="Batch PPL evaluation for all MXFP/MSD setups")
     parser.add_argument("--list", action="store_true", help="List all setups and exit")
     parser.add_argument("--only", nargs="+", type=int, metavar="ID",
@@ -164,7 +160,13 @@ def main():
     parser.add_argument("--gpus", type=str, default=None,
                         help="Comma-separated physical GPU IDs to use, e.g. '4,5,6,7'. "
                              "Must match --nproc (or --nproc_per_node if using torchrun).")
+    parser.add_argument("--model-path", type=str, default=MODEL_PATH, metavar="DIR",
+                        help=f"Local model directory (default: {MODEL_PATH})")
+    parser.add_argument("--results-dir", type=str, default=None, metavar="DIR",
+                        help=f"Directory for result JSON files (default: {RESULTS_DIR})")
     args = parser.parse_args()
+    MODEL_PATH = args.model_path
+    RESULTS_DIR = normalize_output_dir(args.results_dir, RESULTS_DIR)
     restrict_gpus(args.gpus)
     maybe_relaunch_with_torchrun(args.nproc)
 
@@ -184,6 +186,8 @@ def main():
                 print(f"{sid:3d}  {tag:<30}  {desc}{exists}")
         cleanup_distributed()
         return
+
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
     # ── Filter setups ──
     if args.only:
@@ -209,6 +213,12 @@ def main():
     # ── Device & model ──
     if is_main(rank):
         print("Loading tokenizer & model ...")
+
+    if not Path(MODEL_PATH).exists():
+        if is_main(rank):
+            print(f"Error: {describe_missing_model_path(MODEL_PATH)}")
+        cleanup_distributed()
+        return
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, local_files_only=True)
     model_kwargs = {"local_files_only": True, "dtype": dtype}

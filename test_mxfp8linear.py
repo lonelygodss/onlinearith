@@ -229,6 +229,10 @@ def _qfp6e3m2(x):
     return _nearest_on_grid(x.reshape(-1), grid).view(x.shape)
 
 
+def test_mxfp_format_layers():
+    test_mxfp_format_layers()
+
+
 # ── MSD-specific tests ────────────────────────────────────────────────────────
 
 class _CfgFP8_MSD:

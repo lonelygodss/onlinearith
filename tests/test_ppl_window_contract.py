@@ -62,3 +62,13 @@ def test_weighted_nll_is_not_window_loss_average():
     assert total_nll == expected_nll
     assert total_tokens == expected_tokens
     assert ppl_utils.finalize_ppl(total_nll, total_tokens) == expected_ppl
+
+
+def _run_direct() -> None:
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            fn()
+
+
+if __name__ == "__main__":
+    _run_direct()

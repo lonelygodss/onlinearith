@@ -17,6 +17,7 @@ from dist_utils import (
     maybe_relaunch_with_torchrun,
 )
 from experiment_config import apply_config, reconfigure_mlp_layers, reset_to_baseline
+from runtime_paths import default_data_dir, default_model_path, describe_missing_model_path, normalize_output_dir
 
 # ── Configuration ──
 # (Format 1-4 cover the MXFP evaluations)
@@ -31,7 +32,7 @@ CAL_SETUPS = [
      {"use_mxfp4": True}),
 ]
 
-MODEL_PATH = "../Qwen3-0.6B"
+MODEL_PATH = default_model_path("Qwen3-0.6B")
 CAL_DATASET = ("wikitext", "wikitext-2-raw-v1", "validation")
 
 
@@ -130,8 +131,15 @@ def main():
     parser.add_argument("--force", action="store_true", help="Overwrite existing calibration files")
     parser.add_argument("--nproc", type=int, default=1, help="Auto-launch torchrun with N processes")
     parser.add_argument("--gpus", type=str, default="", help="Comma-separated list of GPUs to use")
+    parser.add_argument("--model-path", type=str, default=MODEL_PATH, metavar="DIR",
+                        help=f"Local model directory (default: {MODEL_PATH})")
+    parser.add_argument("--results-root", type=str, default=None, metavar="DIR",
+                        help="Root directory for baseline calibration outputs "
+                             f"(default: {default_data_dir() / 'calib-data_base'})")
     
     args, unparsed = parser.parse_known_args()
+    model_path = args.model_path
+    results_root = normalize_output_dir(args.results_root, default_data_dir() / "calib-data_base")
 
     # ── torchrun auto-launcher ──
     restrict_gpus(args.gpus)
@@ -169,7 +177,7 @@ def main():
 
     my_setups = run_setups[rank::world_size]
 
-    RESULTS_DIR = Path(f"../data/calib-data_base/{args.n}-{args.m}")
+    RESULTS_DIR = results_root / f"{args.n}-{args.m}"
     if is_main(rank):
         RESULTS_DIR.mkdir(parents=True, exist_ok=True)
         print(f"World size: {world_size}  |  Device: {device}  |  dtype: {dtype}")
@@ -186,12 +194,18 @@ def main():
     if is_main(rank):
         print("Loading tokenizer & model ...")
 
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, local_files_only=True)
+    if not Path(model_path).exists():
+        if is_main(rank):
+            print(f"Error: {describe_missing_model_path(model_path)}")
+        cleanup_distributed()
+        return
+
+    tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
         
     model = AutoModelForCausalLM.from_pretrained(
-        MODEL_PATH, local_files_only=True, dtype=dtype
+        model_path, local_files_only=True, dtype=dtype
     )
     model.to(device)
 

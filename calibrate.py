@@ -64,10 +64,11 @@ from experiment_config import (
     reconfigure_mlp_layers,
     reset_to_baseline,
 )
+from runtime_paths import default_data_dir, default_model_path, describe_missing_model_path, normalize_output_dir
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-MODEL_PATH  = "../Qwen3-0.6B"
-RESULTS_DIR = Path("../data")
+MODEL_PATH  = default_model_path("Qwen3-0.6B")
+RESULTS_DIR = default_data_dir()
 CAL_DATASET = ("wikitext", "wikitext-2-raw-v1", "validation")
 
 # ── Calibration setups (one per MXFP format) ─────────────────────────────────
@@ -202,14 +203,20 @@ def main():
                              "these texts.")
     parser.add_argument("--output-dir", type=str, default=None, metavar="DIR",
                         help="Override output directory for calibration JSON files.")
+    parser.add_argument("--model-path", type=str, default=MODEL_PATH, metavar="DIR",
+                        help=f"Local model directory (default: {MODEL_PATH})")
+    parser.add_argument("--results-dir", type=str, default=None, metavar="DIR",
+                        help=f"Base directory for default calibration outputs (default: {RESULTS_DIR})")
     parser.add_argument("--result-suffix", type=str, default="", metavar="NAME",
                         help="Optional suffix appended to result filenames for split-specific runs.")
     args = parser.parse_args()
+    model_path = args.model_path
+    base_results_dir = normalize_output_dir(args.results_dir, RESULTS_DIR)
 
     if args.output_dir:
         output_dir = Path(args.output_dir).expanduser().resolve()
     else:
-        output_dir = RESULTS_DIR / "calib-data" / _snr_to_dir_name(args.target_snr)
+        output_dir = base_results_dir / "calib-data" / _snr_to_dir_name(args.target_snr)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     result_suffix = args.result_suffix.strip()
@@ -271,7 +278,7 @@ def main():
 
     if not my_setups:
         print(f"[rank {rank}] No setups assigned (more GPUs than setups). Idle.")
-        file_barrier(rank, world_size, RESULTS_DIR)
+        file_barrier(rank, world_size, base_results_dir)
         cleanup_distributed()
         return
 
@@ -279,16 +286,22 @@ def main():
     if is_main(rank):
         print("Loading tokenizer & model ...")
 
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, local_files_only=True)
+    if not Path(model_path).exists():
+        if is_main(rank):
+            print(f"Error: {describe_missing_model_path(model_path)}")
+        cleanup_distributed()
+        return
+
+    tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
     model = AutoModelForCausalLM.from_pretrained(
-        MODEL_PATH, local_files_only=True, dtype=dtype
+        model_path, local_files_only=True, dtype=dtype
     )
     model.to(device)
     model.eval()
 
     if is_main(rank):
         num_params = sum(p.numel() for p in model.parameters())
-        print(f"Model: {MODEL_PATH}  |  Params: {num_params/1e6:.1f}M")
+        print(f"Model: {model_path}  |  Params: {num_params/1e6:.1f}M")
 
     # ── Load calibration data ──
     manifest_path = None
@@ -560,7 +573,7 @@ def main():
     total_elapsed = time.perf_counter() - total_start
 
     # ── Wait for all ranks ──
-    file_barrier(rank, world_size, RESULTS_DIR)
+    file_barrier(rank, world_size, base_results_dir)
 
     # ── Summary (rank 0) ──
     if is_main(rank):
