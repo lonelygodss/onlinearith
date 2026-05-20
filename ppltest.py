@@ -76,6 +76,8 @@ from experiment_config import (
 )
 from ppl_utils import (
     accumulate_weighted_nll,
+    clear_mxfp_progress_hook,
+    install_mxfp_progress_hook,
     mask_context_labels,
     precompute_windows,
     prepare_tail_logits_loss_kwargs,
@@ -213,6 +215,11 @@ calibration workflow:
                         help="MSD output chunk target in MiB.")
     parser.add_argument("--weight-cache-dtype", choices=["float16", "float32", "none"], default=None,
                         help="Persistent MXFP quantized-weight cache storage.")
+    parser.add_argument("--mxfp-progress-interval-sec", type=float, default=30.0,
+                        help="Print throttled MX/MSD chunk progress every N seconds. "
+                             "Use 0 for every chunk, or a negative value to disable.")
+    parser.add_argument("--mxfp-progress-file", default=None,
+                        help="Optional path updated atomically with the latest MX/MSD progress event.")
     parser.add_argument("--figure5-layer-cycles", action="store_true",
                         help="Enable Figure 5 layer-cycle profiling in lite stats mode. "
                              "Records per-layer cycle moments from block-serial, "
@@ -370,6 +377,17 @@ calibration workflow:
     if hasattr(model, "_msd_context"):
         model._msd_context = None
         model._msd_context_config_hash = None
+
+    if is_main(rank):
+        install_mxfp_progress_hook(
+            model,
+            interval_sec=args.mxfp_progress_interval_sec,
+            progress_file=args.mxfp_progress_file,
+            device=device,
+            extra={"rank": rank, "setup": selected_setup[0] if selected_setup is not None else None},
+        )
+    else:
+        clear_mxfp_progress_hook(model)
 
     # Determine output filename
     if args.output:
@@ -690,6 +708,7 @@ calibration workflow:
     # Reset perf stats after saving
     if hasattr(model, "reset_perf_stats"):
         model.reset_perf_stats()
+    clear_mxfp_progress_hook(model)
     clear_mxfp_weight_cache(model)
     cleanup_distributed()
 

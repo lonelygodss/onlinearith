@@ -72,6 +72,8 @@ from experiment_config import (
 )
 from ppl_utils import (
     accumulate_weighted_nll,
+    clear_mxfp_progress_hook,
+    install_mxfp_progress_hook,
     mask_context_labels,
     precompute_windows,
     prepare_tail_logits_loss_kwargs,
@@ -159,6 +161,15 @@ def evaluate_ppl(model, encodings, device, seq_len, num_words, num_chars, num_by
     }
 
 
+def progress_file_for_rank_setup(path: str | None, rank: int, setup_id: int, world_size: int) -> str | None:
+    if path is None:
+        return None
+    p = Path(path)
+    if world_size <= 1:
+        return str(p)
+    return str(p.with_name(f"{p.stem}.rank{rank}.setup{setup_id}{p.suffix}"))
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -190,6 +201,12 @@ def main():
                         help="MSD output chunk target in MiB.")
     parser.add_argument("--weight-cache-dtype", choices=["float16", "float32", "none"], default=None,
                         help="Persistent MXFP quantized-weight cache storage.")
+    parser.add_argument("--mxfp-progress-interval-sec", type=float, default=30.0,
+                        help="Print throttled MX/MSD chunk progress every N seconds. "
+                             "Use 0 for every chunk, or a negative value to disable.")
+    parser.add_argument("--mxfp-progress-file", default=None,
+                        help="Optional path updated atomically with the latest MX/MSD progress event. "
+                             "In multi-rank runs, rank/setup suffixes are added.")
     args = parser.parse_args()
     MODEL_PATH = args.model_path
     RESULTS_DIR = normalize_output_dir(args.results_dir, RESULTS_DIR)
@@ -318,6 +335,13 @@ def main():
 
         # Rebuild MLP linear layers to match the new config flags
         reconfigure_mlp_layers(model, device)
+        install_mxfp_progress_hook(
+            model,
+            interval_sec=args.mxfp_progress_interval_sec,
+            progress_file=progress_file_for_rank_setup(args.mxfp_progress_file, rank, sid, world_size),
+            device=device,
+            extra={"rank": rank, "setup": sid},
+        )
 
         # Show active config
         banner = format_config_banner(model.config, setup_id=sid, setup_desc=desc)
@@ -348,6 +372,7 @@ def main():
         wall = results["performance"]["wall_time_sec"]
         print(f"[rank {rank}]   PPL={ppl:.4f}  |  {wall:.0f}s  |  saved -> {result_file.name}\n")
         local_summary.append((sid, tag, ppl, f"{wall:.0f}s"))
+        clear_mxfp_progress_hook(model)
         clear_mxfp_weight_cache(model)
 
     local_elapsed = time.perf_counter() - total_start
@@ -419,6 +444,7 @@ def main():
         print(f"Summary saved to: {summary_file.name}")
         print(f"Results saved in: {RESULTS_DIR}")
 
+    clear_mxfp_progress_hook(model)
     clear_mxfp_weight_cache(model)
     cleanup_distributed()
 
