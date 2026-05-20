@@ -17,6 +17,9 @@ This repository contains evaluation, calibration, distributed helper, plotting, 
 - `experiment_config.py`: setup IDs, setup tags, baseline config fields, and config application helpers. Treat this as the source of truth for setup definitions.
 - `dist_utils.py`: shared distributed helpers.
 - `test_mxfp8linear.py`, `test_fixed_sum_optimizer.py`, `test_distributed.py`: lightweight validation scripts.
+- `tests/test_mx_exact_chunked.py`, `tests/test_mxfp_weight_cache_compact.py`: Qwen3-8B OOM iteration contract tests for exact chunked MX and compact MXFP weight caches.
+- `tools/probe_mxfp_memory.py`: per-layer MXFP/MSD forward memory probe.
+- `scripts/run_qwen8b_oom_ladder.sh`: staged Qwen3-8B OOM acceptance ladder.
 - `../transformers/src/transformers/models/qwen3/modeling_qwen3.py`: current operational Qwen3 implementation. Patch this file for current MXFP/MSD runtime work unless modular-converter work is explicitly requested.
 - `../transformers/src/transformers/models/qwen3/modular_qwen3.py`: reference/modular source only. Do not regenerate `modeling_qwen3.py` from it during cleanup.
 
@@ -46,11 +49,19 @@ Commands in this README can also be run explicitly as `../.venv3_10/bin/python .
 
 ```bash
 python ppltest.py --list
-python ppltest.py --setup 6 --lite --limit-samples 2
+python ppltest.py --setup 6 --stats lite --limit-samples 2
 python ppl_batch.py --list
 python calibrate.py --list
 python test_mxfp8linear.py
 python test_fixed_sum_optimizer.py
+```
+
+Qwen3-8B OOM iteration checks:
+
+```bash
+python tests/test_mx_exact_chunked.py
+python tests/test_mxfp_weight_cache_compact.py
+python tools/probe_mxfp_memory.py --model-path ../Qwen3-8B --setup 2 --seq-len 4096 --stats off --mx-chunk-target-mib 256 --weight-cache-dtype float16
 ```
 
 Multi-process examples:
@@ -83,9 +94,10 @@ Deep-pipeline material is archived/abandoned unless explicitly requested. Existi
 
 ## Next Planned Work
 
-After cleanup, the focused implementation task is:
+The active Qwen3-8B OOM/performance iteration is tracked in `docs/cim_oom_harness/CODEX_OOM_PERF_PLAN.md`. Current focus:
 
 1. Add an exact output-chunked MX-only baseline path in `_MXFPLinearBase` without changing old MX math.
-2. Separate lite/full statistics overhead from PPL numerical behavior so logits, labels, loss, and PPL stay unchanged.
+2. Compact or bound persistent MXFP weight caches.
+3. Separate off/lite/full statistics overhead from PPL numerical behavior so logits, labels, loss, and PPL stay unchanged.
 
-Do not change `MAX_LENGTH`, `STRIDE`, dataset split, tokenizer behavior, calibration semantics, setup IDs, or result schemas as part of cleanup.
+Do not change `MAX_LENGTH`, `STRIDE`, dataset split, tokenizer behavior, calibration semantics, setup IDs, or result schemas as part of this iteration.

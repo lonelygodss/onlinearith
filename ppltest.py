@@ -72,6 +72,7 @@ from experiment_config import (
     reconfigure_mlp_layers,
     reset_peak_memory,
     reset_to_baseline,
+    clear_mxfp_weight_cache,
 )
 from ppl_utils import accumulate_weighted_nll, mask_context_labels, precompute_windows
 from runtime_paths import default_model_path, describe_missing_model_path, normalize_output_dir
@@ -198,6 +199,15 @@ calibration workflow:
                              "mean p_eff, and max latency per layer.  Skips expensive "
                              "NAF-width computation and detailed histograms for faster "
                              "MSD inference.  PPL results are identical to full mode.")
+    parser.add_argument("--stats", choices=["off", "lite", "full"], default="off",
+                        help="MSD performance-statistics mode for PPL runs. "
+                             "--lite maps to --stats lite. (default: off)")
+    parser.add_argument("--mx-chunk-target-mib", type=int, default=None,
+                        help="Exact MX-only output chunk target in MiB.")
+    parser.add_argument("--msd-chunk-target-mib", type=int, default=None,
+                        help="MSD output chunk target in MiB.")
+    parser.add_argument("--weight-cache-dtype", choices=["float16", "float32", "none"], default=None,
+                        help="Persistent MXFP quantized-weight cache storage.")
     parser.add_argument("--figure5-layer-cycles", action="store_true",
                         help="Enable Figure 5 layer-cycle profiling in lite stats mode. "
                              "Records per-layer cycle moments from block-serial, "
@@ -206,9 +216,11 @@ calibration workflow:
     model_path = args.model_path
     results_root = normalize_output_dir(args.results_dir, RESULTS_ROOT)
 
-    auto_enabled_lite = args.figure5_layer_cycles and not args.lite
-    if auto_enabled_lite:
-        args.lite = True
+    if args.lite:
+        args.stats = "lite"
+    auto_enabled_lite = args.figure5_layer_cycles and args.stats != "lite"
+    if args.figure5_layer_cycles:
+        args.stats = "lite"
 
     # ── List mode (no GPU needed) ──
     if args.list:
@@ -274,6 +286,7 @@ calibration workflow:
     model = AutoModelForCausalLM.from_pretrained(model_path, **model_kwargs)
     model.to(device)
     model.eval()
+    model.config.use_cache = False
     reset_peak_memory(device)
 
     if is_main(rank):
@@ -285,9 +298,25 @@ calibration workflow:
         sid, tag, desc, overrides = selected_setup
         reset_to_baseline(model.config)
         apply_config(model.config, overrides)
+        if args.mx_chunk_target_mib is not None:
+            model.config.mxfp_chunk_target_mib = args.mx_chunk_target_mib
+            model.config.mxfp_use_chunked_exact = True
+        if args.msd_chunk_target_mib is not None:
+            model.config.msd_chunk_target_mib = args.msd_chunk_target_mib
+        if args.weight_cache_dtype is not None:
+            model.config.mxfp_weight_cache_dtype = args.weight_cache_dtype
         reconfigure_mlp_layers(model, device)
         if is_main(rank):
             print(format_config_banner(model.config, setup_id=sid, setup_desc=desc))
+    else:
+        if args.mx_chunk_target_mib is not None:
+            model.config.mxfp_chunk_target_mib = args.mx_chunk_target_mib
+            model.config.mxfp_use_chunked_exact = True
+        if args.msd_chunk_target_mib is not None:
+            model.config.msd_chunk_target_mib = args.msd_chunk_target_mib
+        if args.weight_cache_dtype is not None:
+            model.config.mxfp_weight_cache_dtype = args.weight_cache_dtype
+        clear_mxfp_weight_cache(model)
 
     # ── 3b. Inject calibration data (if --calibration given) ─────────────────
     if cal_data_dict is not None:
@@ -306,13 +335,24 @@ calibration workflow:
             n_channels = sum(len(v) for v in cal_data_dict.values())
             print(f"Calibration loaded: {args.calibration} ({n_layers} layers, {n_channels} channels)")
 
-    # ── 3c. Configure lite stats mode (if --lite given) ─────────────────────────
+    # ── 3c. Configure stats mode ─────────────────────────────────────────────
     if auto_enabled_lite and is_main(rank):
-        print("Figure 5 cycle profiling requested without --lite; enabling lite stats mode.")
-    if args.lite:
+        print("Figure 5 cycle profiling requested; enabling lite stats mode.")
+    if args.stats == "off":
+        model.config.msd_perf_stats_enabled = False
+        model.config.msd_perf_stats_lite = False
+        if is_main(rank):
+            print("MSD stats disabled for PPL numerical run.")
+    elif args.stats == "lite":
+        model.config.msd_perf_stats_enabled = True
         model.config.msd_perf_stats_lite = True
         if is_main(rank):
             print("Lite stats mode: skipping NAF-width & histograms for faster inference.")
+    else:
+        model.config.msd_perf_stats_enabled = True
+        model.config.msd_perf_stats_lite = False
+        if is_main(rank):
+            print("Full MSD stats mode enabled.")
     if args.figure5_layer_cycles:
         model.config.msd_figure5_layer_cycles = True
         if is_main(rank):
@@ -322,7 +362,7 @@ calibration workflow:
     if not is_main(rank):
         model.config.msd_perf_stats_enabled = False
     # Invalidate cached MSD context so it picks up the new flags
-    if (args.lite or args.figure5_layer_cycles or not is_main(rank)) and hasattr(model, "_msd_context"):
+    if hasattr(model, "_msd_context"):
         model._msd_context = None
         model._msd_context_config_hash = None
 
@@ -425,8 +465,11 @@ calibration workflow:
         input_ids  = encodings.input_ids[:, begin_loc:end_loc].to(device)
         target_ids = mask_context_labels(input_ids, trg_len)
 
-        with torch.no_grad():
-            outputs = model(input_ids, labels=target_ids)
+        with torch.inference_mode():
+            try:
+                outputs = model(input_ids, labels=target_ids, use_cache=False)
+            except TypeError:
+                outputs = model(input_ids, labels=target_ids)
             avg_nll = outputs.loss.item()
 
         if not is_dummy:
@@ -461,7 +504,7 @@ calibration workflow:
 
     # ── 7b. Collect MSD performance statistics (rank 0 only) ─────────────────
     msd_perf = None
-    if is_main(rank) and hasattr(model, "get_perf_stats"):
+    if args.stats != "off" and is_main(rank) and hasattr(model, "get_perf_stats"):
         msd_perf = model.get_perf_stats(detail_layer=args.detail_layer)
 
     # ── 8. Compute & report metrics (rank 0 only) ───────────────────────────
@@ -510,7 +553,8 @@ calibration workflow:
             "config": {"max_length": MAX_LENGTH, "stride": STRIDE, "dtype": str(dtype),
                        "world_size": world_size,
                        "calibration_file": args.calibration if args.calibration else None,
-                       "text_manifest": str(manifest_path) if manifest_path else None},
+                       "text_manifest": str(manifest_path) if manifest_path else None,
+                       "stats": args.stats},
             "config_snapshot": get_config_snapshot(model.config),
             "metrics": {
                 "token_perplexity": round(token_ppl, 4),
@@ -537,7 +581,7 @@ calibration workflow:
             results["msd_perf_stats"] = msd_perf
             g = msd_perf.get("global", {})
             pl = msd_perf.get("per_layer", {})
-            is_lite = args.lite
+            is_lite = args.stats == "lite"
 
             if is_lite:
                 # ── Lite mode output ──

@@ -27,6 +27,8 @@ nohup.out
 # Experiment outputs
 ppl_results_*.json
 ppl_batch_summary.json
+probe_*.json
+probe_mxfp_memory.json
 qwen3_benchmark_results.json
 benchmark_results*.json
 calibration_*.json

@@ -28,6 +28,9 @@ Active onlinearith files:
 - `dist_utils.py`: torchrun/NCCL and lite distributed helpers.
 - `test_mxfp8linear.py`, `test_fixed_sum_optimizer.py`, `test_distributed.py`: validation scripts. Modernize these before relying on them for major changes.
 - `perf_viz.py`, `calibration_viz.py`, `visualization.py`: plotting and diagnostic helpers.
+- `docs/cim_oom_harness/CODEX_OOM_PERF_PLAN.md`: active Qwen3-8B OOM/performance iteration plan.
+- `tests/test_mx_exact_chunked.py`, `tests/test_mxfp_weight_cache_compact.py`: contract tests for the OOM iteration.
+- `tools/probe_mxfp_memory.py`, `scripts/run_qwen8b_oom_ladder.sh`: memory probe and staged acceptance ladder for Qwen3-8B.
 
 Active modified Transformers files:
 
@@ -87,14 +90,14 @@ PPL correctness is more important than speed. Preserve these unless the user exp
 - `--limit-samples` is only for quick tests and must be clearly marked as a non-final run.
 - `--lite` may reduce stats overhead, but it must not change logits, labels, loss, or PPL.
 
-## Known 8B OOM context for future work
+## Active 8B OOM context
 
-The current cleanup should prepare for, but not implement, these later changes:
+The active iteration is initialized from `docs/cim_oom_harness/CODEX_OOM_PERF_PLAN.md`. Preserve PPL methodology while implementing these changes:
 
 1. Add an exact output-chunked MX-only baseline path in `_MXFPLinearBase.forward()` so the non-MSD MX baseline does not materialize the full `(num_blocks, tokens, out_features)` tensor.
 2. Keep `--lite` or stats-disable controls separate from numerical PPL. Lite stats should only skip expensive performance-statistics details.
-3. Force `use_cache=False` for PPL in the later OOM fix.
-4. Use `logits_to_keep=trg_len+1` plus sliced labels in the later OOM fix only after verifying loss equality on small windows.
+3. Force `use_cache=False` for PPL.
+4. Use `logits_to_keep=trg_len+1` plus sliced labels only after verifying loss equality on small windows.
 5. For Qwen3-8B, avoid 8 data-parallel full model replicas. Model sharding is a later functional change, not cleanup.
 
 ## Coding conventions

@@ -102,8 +102,11 @@ def evaluate_ppl(model, encodings, device, seq_len, num_words, num_chars, num_by
         input_ids  = encodings.input_ids[:, begin_loc:end_loc].to(device)
         target_ids = mask_context_labels(input_ids, trg_len)
 
-        with torch.no_grad():
-            outputs = model(input_ids, labels=target_ids)
+        with torch.inference_mode():
+            try:
+                outputs = model(input_ids, labels=target_ids, use_cache=False)
+            except TypeError:
+                outputs = model(input_ids, labels=target_ids)
             avg_nll = outputs.loss.item()
 
         total_nll_sum, total_tokens = accumulate_weighted_nll(
@@ -164,9 +167,21 @@ def main():
                         help=f"Local model directory (default: {MODEL_PATH})")
     parser.add_argument("--results-dir", type=str, default=None, metavar="DIR",
                         help=f"Directory for result JSON files (default: {RESULTS_DIR})")
+    parser.add_argument("--stats", choices=["off", "lite", "full"], default="off",
+                        help="MSD performance-statistics mode for PPL runs. (default: off)")
+    parser.add_argument("--lite", action="store_true",
+                        help="Backward-compatible alias for --stats lite.")
+    parser.add_argument("--mx-chunk-target-mib", type=int, default=None,
+                        help="Exact MX-only output chunk target in MiB.")
+    parser.add_argument("--msd-chunk-target-mib", type=int, default=None,
+                        help="MSD output chunk target in MiB.")
+    parser.add_argument("--weight-cache-dtype", choices=["float16", "float32", "none"], default=None,
+                        help="Persistent MXFP quantized-weight cache storage.")
     args = parser.parse_args()
     MODEL_PATH = args.model_path
     RESULTS_DIR = normalize_output_dir(args.results_dir, RESULTS_DIR)
+    if args.lite:
+        args.stats = "lite"
     restrict_gpus(args.gpus)
     maybe_relaunch_with_torchrun(args.nproc)
 
@@ -225,6 +240,7 @@ def main():
     model = AutoModelForCausalLM.from_pretrained(MODEL_PATH, **model_kwargs)
     model.to(device)
     model.eval()
+    model.config.use_cache = False
 
     if is_main(rank):
         num_params = sum(p.numel() for p in model.parameters())
@@ -270,6 +286,22 @@ def main():
         # Reset to baseline, then apply this setup's overrides
         reset_to_baseline(model.config)
         apply_config(model.config, overrides)
+        if args.mx_chunk_target_mib is not None:
+            model.config.mxfp_chunk_target_mib = args.mx_chunk_target_mib
+            model.config.mxfp_use_chunked_exact = True
+        if args.msd_chunk_target_mib is not None:
+            model.config.msd_chunk_target_mib = args.msd_chunk_target_mib
+        if args.weight_cache_dtype is not None:
+            model.config.mxfp_weight_cache_dtype = args.weight_cache_dtype
+        if args.stats == "off":
+            model.config.msd_perf_stats_enabled = False
+            model.config.msd_perf_stats_lite = False
+        elif args.stats == "lite":
+            model.config.msd_perf_stats_enabled = True
+            model.config.msd_perf_stats_lite = True
+        else:
+            model.config.msd_perf_stats_enabled = True
+            model.config.msd_perf_stats_lite = False
 
         # Rebuild MLP linear layers to match the new config flags
         reconfigure_mlp_layers(model, device)
@@ -291,7 +323,8 @@ def main():
         results["model"] = MODEL_PATH
         results["dataset"] = f"{ds_name}/{ds_config}/{ds_split}"
         results["config"] = {"max_length": MAX_LENGTH, "stride": STRIDE,
-                             "dtype": str(dtype), "world_size": world_size}
+                             "dtype": str(dtype), "world_size": world_size,
+                             "stats": args.stats}
         results["config_snapshot"] = get_config_snapshot(model.config)
 
         # Save
@@ -360,7 +393,7 @@ def main():
             "model": MODEL_PATH,
             "dataset": "/".join(DATASET),
             "eval_config": {"max_length": MAX_LENGTH, "stride": STRIDE,
-                            "dtype": str(dtype)},
+                            "dtype": str(dtype), "stats": args.stats},
             "world_size": world_size,
             "total_wall_time_sec": round(total_elapsed, 2),
             "setups_requested": len(run_setups),

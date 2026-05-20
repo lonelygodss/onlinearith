@@ -17,6 +17,8 @@ Other scripts import from here instead of keeping local copies:
 
 from __future__ import annotations
 
+import gc
+
 import torch
 
 # ── All custom MXFP / MSD config fields ─────────────────────────────────────
@@ -38,6 +40,9 @@ CUSTOM_QWEN3_CONFIG_DEFAULTS: dict = {
     "mxfp6_format": "e2m3",
     "use_mxfp4": False,
     "mxfp4_block_size": 32,
+    "mxfp_use_chunked_exact": True,
+    "mxfp_chunk_target_mib": 256,
+    "mxfp_weight_cache_dtype": "float16",
     "use_activation_nm_sparsity": False,
     "activation_nm_n": 2,
     "activation_nm_m": 4,
@@ -195,8 +200,14 @@ def validate_setup_definition(setup: tuple[int, str, str, dict]) -> None:
     if active_config["mxfp6_format"] not in {"e2m3", "e3m2"}:
         raise ValueError(f"Setup {setup_id}/{tag}: mxfp6_format must be 'e2m3' or 'e3m2'")
 
-    for field in ("mxfp8_block_size", "mxfp6_block_size", "mxfp4_block_size"):
+    for field in ("mxfp8_block_size", "mxfp6_block_size", "mxfp4_block_size", "mxfp_chunk_target_mib"):
         _require_positive_int(field, active_config[field], setup_id, tag)
+
+    if active_config["mxfp_weight_cache_dtype"] not in {"float16", "float32", "none"}:
+        raise ValueError(
+            f"Setup {setup_id}/{tag}: mxfp_weight_cache_dtype must be one of "
+            f"'float16', 'float32', or 'none', got {active_config['mxfp_weight_cache_dtype']!r}"
+        )
 
     if active_config["use_activation_nm_sparsity"]:
         _require_positive_int("activation_nm_n", active_config["activation_nm_n"], setup_id, tag)
@@ -404,6 +415,22 @@ def reconfigure_mlp_layers(model, device: torch.device) -> None:
     if hasattr(model, "_msd_context"):
         model._msd_context = None
         model._msd_context_config_hash = None
+
+    clear_mxfp_weight_cache(model)
+
+
+def clear_mxfp_weight_cache(model) -> None:
+    """Clear persistent MXFP weight quantization caches from a model."""
+    for module in model.modules():
+        if hasattr(module, "_w_cache"):
+            module._w_cache = None
+        if hasattr(module, "_w_cache_key"):
+            module._w_cache_key = None
+        if hasattr(module, "_w_cache_data_ptr"):
+            module._w_cache_data_ptr = None
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 # ── Memory helpers ────────────────────────────────────────────────────────────

@@ -9,7 +9,7 @@ coding/
   Qwen3-8B/
 ```
 
-Read `onlinearith/CODEX_OOM_PERF_PLAN.md`. Implement the plan in small commits. Do not change PPL methodology (`MAX_LENGTH`, `STRIDE`, dataset, masked-label semantics, weighted NLL). Prioritize:
+Read `onlinearith/docs/cim_oom_harness/CODEX_OOM_PERF_PLAN.md`. Implement the plan in small commits. Do not change PPL methodology (`MAX_LENGTH`, `STRIDE`, dataset, masked-label semantics, weighted NLL). Prioritize:
 
 1. exact output-chunked MX-only path in `_MXFPLinearBase`;
 2. compact `mxfp_weight_cache_dtype=float16` cache with fp32 compute;
