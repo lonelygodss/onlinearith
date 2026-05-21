@@ -57,18 +57,46 @@ Validation already run:
   - first layer gate/up/down completed in about 51.2s / 102.2s / 153.9s;
   - peak_reserved was about 18.951 GiB;
   - run was intentionally timed out after entering `layers.1.mlp.gate_proj`.
+- Valid GPU rerun on 2026-05-21 confirmed direct CUDA access (`True`, 8 devices)
+  and reproduced the kept-path setup 6 baseline:
+  - `probe_setup6_gpu_rerun_progress.json`;
+  - layer 0 gate/up/down completed in about 51.2s / 102.1s / 153.9s;
+  - bounded timeout reached `layers.1.mlp.up_proj` at chunk 1830 / 3072;
+  - peak_reserved reached about 19.3418 GiB.
+- A valid GPU trial replacing NAF-width `floor(log2(combined)) + 1` with
+  `torch.frexp` exponent extraction is now kept in sibling Transformers:
+  - `probe_setup6_gpu_frexp_width_progress.json`;
+  - layer 0 gate/up/down completed in about 45.8s / 91.3s / 137.6s;
+  - bounded timeout reached `layers.1.mlp.up_proj` at 100%, then entered
+    `layers.1.mlp.down_proj`;
+  - peak_reserved stayed about 19.3418 GiB.
+- A valid GPU trial combining frexp-width with in-place stats-off `p_eff`
+  construction was slower and was reverted:
+  - `probe_setup6_gpu_frexp_inplace_progress.json`;
+  - layer 0 gate/up/down completed in about 46.9s / 93.6s / 141.0s;
+  - peak_reserved was not improved enough to justify the slowdown.
+- Important correction from 2026-05-21: the bounded probes run in that Codex
+  sandbox did not have CUDA visibility (`torch.cuda.is_available() == False`,
+  `device_count == 0`, and progress JSON had no `cuda_*` fields). Do not use
+  `probe_setup6_current_progress.json`, `probe_setup6_frexp_width_progress.json`,
+  or `probe_setup6_inplace_peff_progress.json` as GPU performance evidence.
+  GPU commands must be run outside the sandbox / with direct CUDA access.
 - `torch.compile(_msd_truncate)` was tried but is blocked in the current venv by
   `ModuleNotFoundError: No module named 'setuptools'` from Inductor.
 
 Next recommended work:
-1. Inspect probe_setup6_nomask_progress.json to confirm the latest bounded-run
-   state.
-2. Decide whether to spend the full multi-hour setup 6 probe/PPL acceptance run,
+1. First verify CUDA visibility in the command environment:
+   `../.venv3_10/bin/python -c 'import torch; print(torch.cuda.is_available(), torch.cuda.device_count())'`.
+   Expect `True` and 8 devices. If false, do not run probe/PPL performance jobs.
+2. Inspect valid GPU progress files (`probe_setup6_gpu_frexp_width_progress.json`,
+   `probe_setup6_gpu_rerun_progress.json`), not the 2026-05-21 sandbox progress
+   files without `cuda_*` fields.
+3. Decide whether to spend the full multi-hour setup 6 probe/PPL acceptance run,
    or continue optimizing MSD scheduling first.
-3. If optimizing, focus on MSD performance without changing MSD math or PPL
+4. If optimizing, focus on MSD performance without changing MSD math or PPL
    methodology. Current setup 6 chunking at seq_len=4096 is very conservative:
    gate/up use chunk_size=4 and down uses chunk_size=1 because the temporary
    `(N, chunk, nb, bs)` tensor is large.
-4. Keep `PYTORCH_ALLOC_CONF=expandable_segments:True`, `MAX_LENGTH=4096`,
+5. Keep `PYTORCH_ALLOC_CONF=expandable_segments:True`, `MAX_LENGTH=4096`,
    `STRIDE=512`, dataset/tokenizer/labels/loss weighting unchanged.
 ```
