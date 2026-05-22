@@ -175,12 +175,13 @@ Current status at the start of this phase:
   MXFP forward caches from accumulating. Staged all-`up_proj` and all-`down_proj`
   calibration smokes also passed with cache disabled, and a merged full-MLP
   metadata file built from gate/up/down subsets completed a calibrated-MSD PPL
-  smoke. It still needs final/non-smoke calibrated metrics and, if required, a
-  true single-run all-MLP calibration capture.
+  smoke plus a longer non-final prefix80 PPL run. It still needs final
+  calibrated metrics and, if required, a true single-run all-MLP calibration
+  capture.
 * WANDA and activation baseline runner parity is implemented in
   `wanda_base/calibrate_base.py`, `wanda_base/ppl_batch_base.py`, and
-  `act_base/ppl_batch_base_act.py`. Small Qwen3-8B smokes have passed; broader
-  measurements remain.
+  `act_base/ppl_batch_base_act.py`. Small Qwen3-8B smokes and non-final
+  prefix80 measurements have passed; final measurements remain.
 
 Implementation work for this phase:
 
@@ -224,3 +225,22 @@ Acceptance additions:
   memory controls as `ppltest.py`.
 * WANDA and activation baseline smoke runs on Qwen3-8B include valid `cuda_*` or
   peak memory evidence from a direct-CUDA environment.
+
+Phase 5 status after the latest iteration:
+
+* Single-GPU OOM feasibility is now demonstrated across the paper-critical
+  paths: MX-only, uniform MSD setup 6, fixed-sum calibrated MSD, WANDA
+  structured sparsity, and runtime activation n:m.
+* Fixed-sum calibrated MSD using the staged merged full-MLP `target-snr`
+  metadata completed `--limit-samples 80`: scored_tokens=4,144,
+  token_ppl=8.8632, mean_nll=2.1819, peak_memory=28.03 GB,
+  peak_reserved=28.7617 GiB, wall_time=1998.8s.
+* WANDA prefix80 completed with token_ppl=15.6914, mean_nll=2.7531,
+  peak_memory=27.61 GB, wall_time=31.85s. The runner expects the mask under
+  `--results-root/<n>-<m>/`; this run used a symlink to the existing smoke mask.
+* Runtime activation n:m prefix80 completed with token_ppl=11.3428,
+  mean_nll=2.4286, peak_memory=27.61 GB, wall_time=33.03s.
+* The current stage is done for OOM and runner-hygiene parity. Further work
+  should prioritize calibrated-MSD runtime: the fixed-sum prefix80 path is about
+  60x slower than WANDA/activation on the same prefix while staying within the
+  memory budget.

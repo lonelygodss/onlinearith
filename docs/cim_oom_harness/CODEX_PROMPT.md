@@ -52,4 +52,5 @@ Acceptance criteria:
 * gate/up/down fixed-sum subset metadata can be merged into a staged full-MLP calibration JSON because `msd_calibration_data` is keyed by projection module name;
 * fixed-sum calibrated MSD PPL uses generated `msd_calibration_data` from `calibrate.py --optimizer fixed_sum --target-snr ...` and completes a Qwen3-8B smoke;
 * WANDA and activation n:m baseline runners use the same GPU visibility, allocator, chunk/cache, `use_cache=False`, and PPL loss/window semantics as `ppltest.py`;
+* prefix80 Qwen3-8B measurements exist for staged full-MLP fixed-sum calibrated MSD, WANDA, and activation n:m; OOM feasibility is established, but fixed-sum calibrated MSD runtime is the main remaining optimization target;
 * small-layer exact MX test passes without changing old MX math.

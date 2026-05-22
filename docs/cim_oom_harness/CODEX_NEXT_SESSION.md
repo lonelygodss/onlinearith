@@ -28,6 +28,8 @@ GPU visibility rule:
   performance work in that environment.
 - Valid GPU progress has cuda_alloc_gib/cuda_peak_* fields and should be visible
   in nvtop. Ignore sandbox progress files without cuda_* fields.
+- Current GPU snapshot after the latest prefix80 runs: GPUs 0-3 are idle
+  (~15 MiB, 0% util); GPUs 4-7 are busy (~15.2 GiB each).
 
 Current implementation:
 - Exact output-chunked MX-only path is implemented.
@@ -70,7 +72,8 @@ Path parity status:
   generation has the new controls, `ppltest.py --calibration` injects metadata
   into the optimized MSD runtime, and Qwen3-8B PPL smokes using generated
   fixed-sum metadata have passed for one-layer, all-gate, all-up, all-down, and
-  merged full-MLP staged metadata. Missing: final/non-smoke calibrated metrics
+  merged full-MLP staged metadata. A longer non-final prefix80 run using the
+  merged full-MLP staged metadata also passed. Missing: final calibrated metrics
   and, if needed, a true single-run all-MLP calibration capture.
 - WANDA structured sparsity baseline runner parity is implemented for
   `wanda_base/calibrate_base.py` and `wanda_base/ppl_batch_base.py`: early
@@ -79,8 +82,7 @@ Path parity status:
   progress hook support, cache cleanup, and `--limit-samples` smoke support.
 - Runtime activation n:m baseline runner parity is implemented for
   `act_base/ppl_batch_base_act.py` with the same PPL/runtime controls as WANDA.
-  Missing: broader/final WANDA and activation baseline measurements beyond the
-  small Qwen3-8B smoke runs below.
+  WANDA and activation prefix80 runs have passed; final measurements remain.
 
 Valid GPU measurements:
 - Setup 2 probe, seq_len=4096: status ok; peak_alloc=27.6147 GiB;
@@ -176,11 +178,28 @@ Valid GPU measurements:
   --limit-samples 2 --stats off --mx-chunk-target-mib 256 --msd-chunk-target-mib 256
   --weight-cache-dtype float16 --compile-msd-truncate`. It scored 8 tokens,
   token PPL=362.5553, mean NLL=5.8932, peak memory=27.08 GB, wall time=5.9s.
+- Calibrated-MSD Qwen3-8B prefix80 run completed on GPU 0 using the merged
+  full-MLP staged metadata:
+  `ppltest.py --setup 6 --calibration /tmp/onlinearith_calib_mlp_merged_smoke/calibration_MXFP8_fixed_sum_qwen8b_mlp_merged_snr30_smoke_nocache.json
+  --limit-samples 80 --stats off --mx-chunk-target-mib 256 --msd-chunk-target-mib 256
+  --weight-cache-dtype float16 --compile-msd-truncate`. This is non-final, but
+  it evaluates two windows including a full 4,096-token context window. It
+  scored 4,144 tokens, token PPL=8.8632, mean NLL=2.1819, peak memory=28.03 GB,
+  peak_reserved during progress=28.7617 GiB, throughput=2.1 tokens/s, wall
+  time=1998.8s. Output:
+  `/tmp/onlinearith_calibrated_msd_mlp_merged_snr30_ppl_prefix80.json`.
 - Runtime activation n:m Qwen3-8B smoke completed on GPU 0:
   `act_base/ppl_batch_base_act.py --model-path ../Qwen3-8B --gpus 0 --only 1
   -n 2 -m 4 --limit-samples 2 --mx-chunk-target-mib 256 --weight-cache-dtype float16`.
   It scored 8 tokens, token PPL=831.3688, mean NLL=6.7231, peak memory=26.54 GB,
   wall time=1.23s, with valid `cuda_*` MX progress fields.
+- Runtime activation n:m Qwen3-8B prefix80 run completed on GPU 2:
+  `act_base/ppl_batch_base_act.py --model-path ../Qwen3-8B --gpus 2 --only 1
+  -n 2 -m 4 --limit-samples 80 --mx-chunk-target-mib 256
+  --weight-cache-dtype float16 --results-root /tmp/onlinearith_act_prefix80 --force`.
+  It scored the same prefix as the calibrated-MSD prefix80 run, token
+  PPL=11.3428, mean NLL=2.4286, peak memory=27.61 GB, wall time=33.03s, summary
+  `/tmp/onlinearith_act_prefix80/2-4/ppl_batch_base_act_summary.json`.
 - WANDA Qwen3-8B smoke completed on GPU 2. First,
   `wanda_base/calibrate_base.py --model-path ../Qwen3-8B --gpus 2 --setup 1
   -n 2 -m 4 --num-texts 1 --max-length 64 --batch-size 1 --mx-chunk-target-mib 256
@@ -191,6 +210,17 @@ Valid GPU measurements:
   --output-hook qwen8b_smoke` scored 8 tokens, token PPL=576.8480,
   mean NLL=6.3576, peak memory=26.54 GB, wall time=0.95s, with valid `cuda_*`
   MX progress fields.
+- WANDA Qwen3-8B prefix80 run completed on GPU 1. The WANDA PPL runner expects
+  the mask under its `--results-root`/`n-m` directory; a symlink was used from
+  `/tmp/onlinearith_wanda_prefix80/2-4/calibration_base_MXFP8_qwen8b_smoke_prefix80.pt`
+  to the existing smoke mask
+  `/tmp/onlinearith_wanda_smoke/2-4/calibration_base_MXFP8_qwen8b_smoke.pt`.
+  Then `wanda_base/ppl_batch_base.py --model-path ../Qwen3-8B --gpus 1 --only 1
+  -n 2 -m 4 --limit-samples 80 --mx-chunk-target-mib 256
+  --weight-cache-dtype float16 --results-root /tmp/onlinearith_wanda_prefix80
+  --output-hook qwen8b_smoke_prefix80 --force` completed. Token PPL=15.6914,
+  mean NLL=2.7531, peak memory=27.61 GB, wall time=31.85s, summary
+  `/tmp/onlinearith_wanda_prefix80/2-4/ppl_batch_base_summary_qwen8b_smoke_prefix80.json`.
 
 Invalid/non-source-of-truth artifacts:
 - Ignore 2026-05-21 sandbox progress files without cuda_* fields. They were CPU
@@ -208,23 +238,31 @@ Recommended next steps:
    ../.venv3_10/bin/python test_mxfp8linear.py
    ../.venv3_10/bin/python test_fixed_sum_optimizer.py
    ../.venv3_10/bin/python calibrate.py --list
-3. Stage broader fixed-sum calibrated-MSD validation:
-   one-layer, all-gate, all-up, all-down, and merged full-MLP metadata smokes
-   are done. Next either run a longer non-final prefix using the merged full-MLP
-   metadata, or attempt a true single-run all-MLP calibration capture with
+3. Treat the current stage as done for single-GPU OOM feasibility across the
+   paper-critical paths: MX-only, uniform MSD, fixed-sum calibrated MSD,
+   WANDA, and activation n:m have direct-CUDA Qwen3-8B evidence. The fixed-sum
+   calibrated path is functionally aligned but remains the major runtime
+   outlier.
+4. For calibrated fixed-sum MSD, either run final metrics with generated
+   metadata or attempt a true single-run all-MLP calibration capture with
    `--weight-cache-dtype none` if exact capture equivalence is required. Treat
    `target-snr` fixed-sum metadata as the main calibrated method.
-4. Run broader WANDA and activation baseline measurements now that the runners
-   have parity and small Qwen3-8B smokes pass. Keep `--limit-samples` runs
+5. For WANDA and activation baselines, proceed from prefix80 to final
+   measurements with the same runner flags. Keep any `--limit-samples` runs
    clearly marked non-final.
-5. Full setup 6 seq_len=4096 probe completes in about 17.7 minutes with
+6. Full setup 6 seq_len=4096 probe completes in about 17.7 minutes with
    compile enabled; a two-window setup 6 PPL smoke takes about 33.3 minutes.
-6. If optimizing further, keep MSD math unchanged and benchmark only with direct
+7. If optimizing further, keep MSD math unchanged and benchmark only with direct
    CUDA.
    Current conservative setup 6 chunking at seq_len=4096 uses gate/up chunk 4
    and down chunk 1 because the temporary (N, chunk, nb, bs) tensor is large.
-7. Consider a calibration-specific runtime improvement that disables unrelated
+8. Consider a calibration-specific runtime improvement that disables unrelated
    persistent MXFP forward weight caches during capture while preserving selected
    calibration metadata. This would make broad projection-filtered fixed-sum
    calibration less dependent on manually choosing `--weight-cache-dtype none`.
+9. Main further-improvement direction: speed up calibrated MSD inference. The
+   prefix80 calibrated-MSD run took about 1999s versus about 32-33s for WANDA
+   and activation n:m on the same prefix. Focus on output-chunk scheduling,
+   reducing per-chunk temporary work, and compile/fusion opportunities while
+   preserving the existing MSD truncation math and PPL invariants.
 ```
