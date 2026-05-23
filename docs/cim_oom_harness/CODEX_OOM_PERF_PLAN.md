@@ -27,7 +27,7 @@ Add config fields to Qwen3Config and to `onlinearith/experiment_config.py` defau
 ```python
 "mxfp_use_chunked_exact": True,
 "mxfp_chunk_target_mib": 256,
-"mxfp_weight_cache_dtype": "float16",  # choices: "float32", "float16", "none"
+"mxfp_weight_cache_dtype": "float16",  # choices: "float32", "float16", "float8", "none"
 ```
 
 Implement `_forward_mx_exact_chunked(self, x_q, x_scales, w_q, w_scales, N)` with identical math to the current non-MSD path, but chunk `j0:j1` over output channels:
@@ -71,7 +71,8 @@ Rules:
 
 1. `mxfp_weight_cache_dtype="float32"`: old behavior for debugging small models.
 2. `mxfp_weight_cache_dtype="float16"`: store `w_q` as fp16, store `w_scales` as fp32, and cast `w_q` chunks back to fp32 in chunked MX/MSD math. OCP MXFP4/6/8 representable normalized values should be exactly representable in fp16; validate with tests.
-3. `mxfp_weight_cache_dtype="none"`: no persistent cache; recompute per forward for lowest memory, useful for debugging OOM.
+3. `mxfp_weight_cache_dtype="float8"`: MXFP8-only mode that stores `w_q` as native `torch.float8_e4m3fn`, keeps `w_scales` as fp32, and casts chunks back to fp32 for compute. This is the preferred Qwen3-8B cache mode for MXFP8 setups once exactness is validated.
+4. `mxfp_weight_cache_dtype="none"`: no persistent cache; recompute per forward for lowest memory, useful for debugging OOM.
 
 Add `clear_mxfp_weight_cache(model)` in `onlinearith/experiment_config.py` and call it after setup changes, before/after batch setup transitions, and after OOM probe runs. It should walk modules and set `_w_cache = None`, `_w_cache_key = None`, `_w_cache_data_ptr = None`, then run `gc.collect()` and `torch.cuda.empty_cache()` if CUDA is available.
 
@@ -87,7 +88,7 @@ Add flags:
 --stats {off,lite,full}      default: off for PPL numerical runs
 --mx-chunk-target-mib N      forwards to model.config.mxfp_chunk_target_mib
 --msd-chunk-target-mib N     forwards to model.config.msd_chunk_target_mib
---weight-cache-dtype {float16,float32,none}
+--weight-cache-dtype {float16,float32,float8,none}
 ```
 
 Backward compatibility:
@@ -134,9 +135,9 @@ Run from `onlinearith` with `PYTHONPATH=../transformers/src:$PYTHONPATH`.
 1. `python tests/test_mx_exact_chunked.py`
 2. `python tests/test_mxfp_weight_cache_compact.py`
 3. `python tools/probe_mxfp_memory.py --model-path ../Qwen3-8B --setup 1 --seq-len 256 --stats off`
-4. `python tools/probe_mxfp_memory.py --model-path ../Qwen3-8B --setup 2 --seq-len 4096 --mx-chunk-target-mib 256 --weight-cache-dtype float16 --stats off`
-5. `python tools/probe_mxfp_memory.py --model-path ../Qwen3-8B --setup 6 --seq-len 4096 --mx-chunk-target-mib 256 --msd-chunk-target-mib 256 --weight-cache-dtype float16 --stats off`
-6. `python ppltest.py --model-path ../Qwen3-8B --setup 2 --gpus 0 --stats off --mx-chunk-target-mib 256 --weight-cache-dtype float16 --limit-samples 2`
+4. `python tools/probe_mxfp_memory.py --model-path ../Qwen3-8B --setup 2 --seq-len 4096 --mx-chunk-target-mib 256 --weight-cache-dtype float8 --stats off`
+5. `python tools/probe_mxfp_memory.py --model-path ../Qwen3-8B --setup 6 --seq-len 4096 --mx-chunk-target-mib 256 --msd-chunk-target-mib 256 --weight-cache-dtype float8 --stats off`
+6. `python ppltest.py --model-path ../Qwen3-8B --setup 2 --gpus 0 --stats off --mx-chunk-target-mib 256 --weight-cache-dtype float8 --limit-samples 2`
 7. Full setup 2 on one GPU.
 8. Setup 6 with `--stats off`, then `--stats lite` only when collecting figure stats.
 
@@ -240,6 +241,13 @@ Phase 5 status after the latest iteration:
   `--results-root/<n>-<m>/`; this run used a symlink to the existing smoke mask.
 * Runtime activation n:m prefix80 completed with token_ppl=11.3428,
   mean_nll=2.4286, peak_memory=27.61 GB, wall_time=33.03s.
+* Native MXFP8 float8 cache is implemented and validated as exact against the
+  float32 cache path. Setup 6 seq_len=4096 with `--weight-cache-dtype float8`
+  completed with loss=0.01120709, peak_alloc=22.7762 GiB,
+  peak_reserved=23.8984 GiB, reserved_headroom=7.4583 GiB, and cache total
+  5.6953 GiB. The previous float16-cache probe had the same loss with
+  peak_alloc=27.8387 GiB, peak_reserved=28.7617 GiB, and cache total
+  10.7578 GiB.
 * The current stage is done for OOM and runner-hygiene parity. Further work
   should prioritize calibrated-MSD runtime: the fixed-sum prefix80 path is about
   60x slower than WANDA/activation on the same prefix while staying within the

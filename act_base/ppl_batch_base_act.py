@@ -297,7 +297,7 @@ def main():
                         help="Non-final smoke mode: limit dataset text samples before tokenization.")
     parser.add_argument("--mx-chunk-target-mib", type=int, default=None,
                         help="Exact MX-only output chunk target in MiB.")
-    parser.add_argument("--weight-cache-dtype", choices=["float16", "float32", "none"], default=None,
+    parser.add_argument("--weight-cache-dtype", choices=["float16", "float32", "float8", "none"], default=None,
                         help="Persistent MXFP quantized-weight cache storage.")
     parser.add_argument("--mxfp-progress-interval-sec", type=float, default=30.0,
                         help="Print throttled MX/MSD chunk progress every N seconds. "

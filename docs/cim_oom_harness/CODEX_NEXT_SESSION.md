@@ -35,7 +35,9 @@ Current implementation:
 - Exact output-chunked MX-only path is implemented.
 - Compact MXFP weight cache is implemented.
 - PPL/probe flags are implemented: --stats, --mx-chunk-target-mib,
-  --msd-chunk-target-mib, --weight-cache-dtype.
+  --msd-chunk-target-mib, --weight-cache-dtype. `float8` is supported for
+  MXFP8 weight caches and is the recommended Qwen3-8B MXFP8 cache mode; use
+  `float16` or `none` for non-MXFP8 paths.
 - Tail-logits chunked loss is implemented and covered by tests.
 - Shared MXFP/MSD progress reporting is wired into probe, ppltest, ppl_batch,
   and the ladder script.
@@ -108,6 +110,14 @@ Valid GPU measurements:
   elapsed=1059.95s; loss=0.01120709; peak_alloc=27.8387 GiB;
   peak_reserved=28.7617 GiB; reserved_headroom=2.5950 GiB;
   meets_min_headroom=true; mxfp_weight_cache.total_gib=10.7578.
+- Setup 6 with native MXFP8 `--weight-cache-dtype float8`,
+  `--compile-msd-truncate`, seq_len=4096: status ok; elapsed=1060.33s;
+  loss=0.01120709; peak_alloc=22.7762 GiB; peak_reserved=23.8984 GiB;
+  reserved_headroom=7.4583 GiB; meets_min_headroom=true;
+  mxfp_weight_cache.total_gib=5.6953, with 5.0625 GiB stored as
+  `torch.float8_e4m3fn` and 0.6328 GiB fp32 scales. This has the same loss and
+  essentially the same runtime as the float16-cache probe, while saving about
+  5.06 GiB allocated and 4.86 GiB reserved.
 - Setup 6 `ppltest --limit-samples=2 --compile-msd-truncate` completed on one
   GPU. It is a smoke only: the first two WikiText test samples score 8 tokens.
   Token PPL=423.0598, mean NLL=6.0475, peak memory=27.08 GB.
@@ -243,24 +253,28 @@ Recommended next steps:
    WANDA, and activation n:m have direct-CUDA Qwen3-8B evidence. The fixed-sum
    calibrated path is functionally aligned but remains the major runtime
    outlier.
-4. For calibrated fixed-sum MSD, either run final metrics with generated
+4. Use `--weight-cache-dtype float8` for Qwen3-8B MXFP8 setup 2/setup 6 probes
+   and PPL runs when the goal is memory headroom. Use `float16` for MXFP4/6 or
+   mixed batch sweeps that include non-MXFP8 setups, and use `none` for broad
+   calibration capture if unrelated forward caches would otherwise accumulate.
+5. For calibrated fixed-sum MSD, either run final metrics with generated
    metadata or attempt a true single-run all-MLP calibration capture with
    `--weight-cache-dtype none` if exact capture equivalence is required. Treat
    `target-snr` fixed-sum metadata as the main calibrated method.
-5. For WANDA and activation baselines, proceed from prefix80 to final
+6. For WANDA and activation baselines, proceed from prefix80 to final
    measurements with the same runner flags. Keep any `--limit-samples` runs
    clearly marked non-final.
-6. Full setup 6 seq_len=4096 probe completes in about 17.7 minutes with
+7. Full setup 6 seq_len=4096 probe completes in about 17.7 minutes with
    compile enabled; a two-window setup 6 PPL smoke takes about 33.3 minutes.
-7. If optimizing further, keep MSD math unchanged and benchmark only with direct
+8. If optimizing further, keep MSD math unchanged and benchmark only with direct
    CUDA.
    Current conservative setup 6 chunking at seq_len=4096 uses gate/up chunk 4
    and down chunk 1 because the temporary (N, chunk, nb, bs) tensor is large.
-8. Consider a calibration-specific runtime improvement that disables unrelated
+9. Consider a calibration-specific runtime improvement that disables unrelated
    persistent MXFP forward weight caches during capture while preserving selected
    calibration metadata. This would make broad projection-filtered fixed-sum
    calibration less dependent on manually choosing `--weight-cache-dtype none`.
-9. Main further-improvement direction: speed up calibrated MSD inference. The
+10. Main further-improvement direction: speed up calibrated MSD inference. The
    prefix80 calibrated-MSD run took about 1999s versus about 32-33s for WANDA
    and activation n:m on the same prefix. Focus on output-chunk scheduling,
    reducing per-chunk temporary work, and compile/fusion opportunities while

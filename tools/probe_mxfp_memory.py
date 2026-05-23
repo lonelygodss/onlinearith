@@ -163,7 +163,7 @@ def main() -> int:
     parser.add_argument("--dtype", choices=["float16", "bfloat16", "float32"], default="float16")
     parser.add_argument("--mx-chunk-target-mib", type=int, default=None)
     parser.add_argument("--msd-chunk-target-mib", type=int, default=None)
-    parser.add_argument("--weight-cache-dtype", choices=["float16", "float32", "none"], default=None)
+    parser.add_argument("--weight-cache-dtype", choices=["float16", "float32", "float8", "none"], default=None)
     parser.add_argument("--stats", choices=["off", "lite", "full"], default="off")
     parser.add_argument("--compile-msd-truncate", action="store_true",
                         help="Compile the MSD truncation primitive with torch.compile.")

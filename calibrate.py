@@ -232,7 +232,7 @@ def main():
                         help="Exact MX output chunk target in MiB used during calibration capture.")
     parser.add_argument("--cal-chunk-target-mib", type=int, default=None,
                         help="Calibration solver 4D intermediate chunk target in MiB.")
-    parser.add_argument("--weight-cache-dtype", choices=["float16", "float32", "none"], default=None,
+    parser.add_argument("--weight-cache-dtype", choices=["float16", "float32", "float8", "none"], default=None,
                         help="Persistent MXFP quantized-weight cache storage during calibration capture.")
     parser.add_argument("--compile-msd-truncate", action="store_true",
                         help="Compile the calibration MSD truncation primitive with torch.compile.")

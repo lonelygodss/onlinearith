@@ -174,7 +174,7 @@ def main():
     parser.add_argument("--gpus", type=str, default="", help="Comma-separated list of GPUs to use")
     parser.add_argument("--mx-chunk-target-mib", type=int, default=None,
                         help="Exact MX-only output chunk target in MiB.")
-    parser.add_argument("--weight-cache-dtype", choices=["float16", "float32", "none"], default=None,
+    parser.add_argument("--weight-cache-dtype", choices=["float16", "float32", "float8", "none"], default=None,
                         help="Persistent MXFP quantized-weight cache storage during calibration.")
     parser.add_argument(
         "--output-hook",

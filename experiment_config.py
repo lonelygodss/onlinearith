@@ -204,10 +204,10 @@ def validate_setup_definition(setup: tuple[int, str, str, dict]) -> None:
     for field in ("mxfp8_block_size", "mxfp6_block_size", "mxfp4_block_size", "mxfp_chunk_target_mib"):
         _require_positive_int(field, active_config[field], setup_id, tag)
 
-    if active_config["mxfp_weight_cache_dtype"] not in {"float16", "float32", "none"}:
+    if active_config["mxfp_weight_cache_dtype"] not in {"float16", "float32", "float8", "none"}:
         raise ValueError(
             f"Setup {setup_id}/{tag}: mxfp_weight_cache_dtype must be one of "
-            f"'float16', 'float32', or 'none', got {active_config['mxfp_weight_cache_dtype']!r}"
+            f"'float16', 'float32', 'float8', or 'none', got {active_config['mxfp_weight_cache_dtype']!r}"
         )
 
     if active_config["use_activation_nm_sparsity"]:

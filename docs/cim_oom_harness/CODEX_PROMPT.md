@@ -12,7 +12,8 @@ coding/
 Read `onlinearith/docs/cim_oom_harness/CODEX_OOM_PERF_PLAN.md`. Implement the plan in small commits. Do not change PPL methodology (`MAX_LENGTH`, `STRIDE`, dataset, masked-label semantics, weighted NLL). Prioritize:
 
 1. exact output-chunked MX-only path in `_MXFPLinearBase`;
-2. compact `mxfp_weight_cache_dtype=float16` cache with fp32 compute;
+2. compact MXFP weight cache, using `mxfp_weight_cache_dtype=float8` for
+   MXFP8 Qwen3-8B runs and `float16`/`none` for non-MXFP8 paths;
 3. PPL flags for stats/chunk/cache control;
 4. memory probe and acceptance ladder.
 5. calibration runner parity with the same GPU, chunk, cache, compile, and
@@ -46,6 +47,8 @@ Acceptance criteria:
 
 * setup 2, seq_len 4096 probe completes on one 32 GB GPU with at least 2 GiB headroom;
 * setup 6, seq_len 4096 probe completes with `--stats off`;
+* setup 6, seq_len 4096 with `--weight-cache-dtype float8` completes with
+  unchanged loss versus the float16 cache and substantially more headroom;
 * `ppltest.py --setup 2 --limit-samples 2` and `--setup 6 --limit-samples 2` complete on a single GPU;
 * a targeted 8B calibration smoke with `--projection-filter` captures only the requested projection and completes on one GPU;
 * broader fixed-sum calibration subsets use `--weight-cache-dtype none` for now, because projection-filtered hooks do not prevent unrelated persistent MXFP forward caches from accumulating;

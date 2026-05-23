@@ -9,7 +9,7 @@ MODEL_PATH="${MODEL_PATH:-../Qwen3-8B}"
 GPU="${GPU:-0}"
 MX_CHUNK="${MX_CHUNK:-256}"
 MSD_CHUNK="${MSD_CHUNK:-256}"
-CACHE_DTYPE="${CACHE_DTYPE:-float16}"
+CACHE_DTYPE="${CACHE_DTYPE:-float8}"
 
 python tests/test_mx_exact_chunked.py
 python tests/test_mxfp_weight_cache_compact.py
