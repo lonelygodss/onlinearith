@@ -1,6 +1,6 @@
 # Baseline MXFP Structured Sparsification
 
-This repository provides an $N:M$ structured baseline sparsify metric compatible precisely with `MXFP` quantization workflows. The sparsification runs solely via offline metric calibration and masks out parameters directly prior to runtime. This ensures that inference involves completely native speed “standard calculations.”
+This repository provides an $N:M$ structured baseline sparsify metric compatible precisely with `MXFP` quantization workflows. The repository uses the common convention: $N:M$ means **keep $N$ values in each group of $M$**. Internally, this masks out $(M-N):M$ values. The sparsification runs solely via offline metric calibration and masks out parameters directly prior to runtime. This ensures that inference involves native standard calculation.
 
 ## Mathematical Evaluation Metric
 Consider a standard linguistic prediction projection task via parameterized continuous linear layers. The output corresponds directly to $Y = X \cdot W^T$.
@@ -20,7 +20,7 @@ The resulting row matrix $S$ (shape $C_{out}, C_{in}$) reflects local significan
 Instead of globally scaling unconstrained unstructured parameters ($S \%$ pruning on standard sorted boundaries), this baseline methodology incorporates grouped masking parameter constraints natively into blocks defined by $M$:
 - Across every row mapping projection, sequential channels form a structural boundary of $M$ group size.
 - A local sort maps parameters strictly against this isolated dimension.
-- The minimum threshold sequence composed strictly of length $N$ becomes permanently eliminated (its weights physically zeroed out).
+- The minimum threshold sequence composed strictly of length $(M-N)$ becomes permanently eliminated (its weights physically zeroed out), leaving $N$ kept values per group.
 
 ## Workflows
 

@@ -1,5 +1,5 @@
 """
-Batch PPL evaluation for activation-only n:m sparsity across MXFP setups.
+Batch PPL evaluation for activation-only common N:M sparsity across MXFP setups.
 
 Supports **multi-GPU** — either auto-launched (recommended) or via torchrun:
     python act_base/ppl_batch_base_act.py --nproc 8                        # auto-launch 8 GPUs (picks free port)
@@ -17,7 +17,7 @@ result files independently (no inter-rank communication during eval).
 Rank 0 prints the summary after all ranks finish.
 
 Loads the model ONCE per rank, then iterates through every assigned setup
-by patching config fields in-memory. Runtime activation-only n:m sparsity is
+by patching config fields in-memory. Runtime activation-only N:M sparsity is
 enabled from args for each setup. Each run's results are saved to
     ppl_results_{tag}.json
 
@@ -96,7 +96,7 @@ from experiment_config import (
     BASELINE_CONFIG, apply_config, reset_to_baseline,
     reconfigure_mlp_layers, get_config_snapshot, get_active_flags,
     format_config_banner,peak_memory_str,
-    reset_peak_memory, clear_mxfp_weight_cache,
+    reset_peak_memory, clear_mxfp_weight_cache, validate_nm_keep_ratio,
 )
 from ppl_utils import (
     accumulate_weighted_nll,
@@ -276,14 +276,14 @@ def run_complete_mode(args):
 
 def main():
     global MODEL_PATH, RESULTS_ROOT, RESULTS_DIR
-    parser = argparse.ArgumentParser(description="Batch PPL evaluation for activation-only n:m sparsity")
+    parser = argparse.ArgumentParser(description="Batch PPL evaluation for activation-only common N:M sparsity")
     parser.add_argument("--complete", action="store_true",
                         help="Run all discovered n-m cases serially (one ppl_batch_base run per case).")
     parser.add_argument("--list", action="store_true", help="List all setups and exit")
     parser.add_argument("--only", nargs="+", type=int, metavar="ID",
                         help="Run only these setup IDs (e.g. --only 1 6 10)")
-    parser.add_argument("-n", type=int, default=2, help="Sparsify n elements")
-    parser.add_argument("-m", type=int, default=4, help="Group size")
+    parser.add_argument("-n", type=int, default=2, help="Common N:M keep count: keep n elements in each m-group")
+    parser.add_argument("-m", type=int, default=4, help="Common N:M group size")
     parser.add_argument("--force", action="store_true",
                         help="Re-run even if result file already exists")
     parser.add_argument("--nproc", type=int, default=None, metavar="N",
@@ -312,12 +312,10 @@ def main():
     MODEL_PATH = args.model_path
     RESULTS_ROOT = normalize_output_dir(args.results_root, RESULTS_ROOT)
 
-    if args.m <= 0:
-        raise SystemExit("ERROR: -m must be > 0.")
-    if args.n < 0:
-        raise SystemExit("ERROR: -n must be >= 0.")
-    if args.n >= args.m:
-        raise SystemExit(f"ERROR: activation n:m requires n < m, got n={args.n}, m={args.m}.")
+    try:
+        validate_nm_keep_ratio(args.n, args.m, label="activation N:M")
+    except ValueError as exc:
+        raise SystemExit(f"ERROR: {exc}") from exc
 
     if args.complete:
         exit_code = run_complete_mode(args)
@@ -442,7 +440,7 @@ def main():
         if args.weight_cache_dtype is not None:
             model.config.mxfp_weight_cache_dtype = args.weight_cache_dtype
 
-        # Activation-only n:m mode: no offline mask file required.
+        # Activation-only common N:M mode: no offline mask file required.
         apply_config(model.config, {
             "use_activation_nm_sparsity": True,
             "activation_nm_n": args.n,
@@ -488,8 +486,11 @@ def main():
                              "limit_samples": args.limit_samples}
         results["activation_sparsity"] = {
             "mode": "runtime_activation_nm",
+            "notation": "common_N:M_keep",
             "n": args.n,
             "m": args.m,
+            "keep_n": args.n,
+            "prune_n": args.m - args.n,
         }
         results["config_snapshot"] = get_config_snapshot(model.config)
 

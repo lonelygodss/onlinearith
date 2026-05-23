@@ -20,6 +20,9 @@ Read `onlinearith/docs/cim_oom_harness/CODEX_OOM_PERF_PLAN.md`. Implement the pl
    projection-filter controls.
 6. parity for paper-critical baselines: fixed-sum calibrated MSD, uniform MSD,
    MX-only, WANDA structured sparsity, and runtime activation n:m.
+7. keep `docs/experiments_time_estimates.md` current as optimization changes
+   the single-setup runtime estimates for the Qwen3-0.6B/1.7B/4B/8B family.
+   Sweeps and multi-GPU estimates are deferred.
 
 Use these tests as contracts:
 
@@ -55,5 +58,9 @@ Acceptance criteria:
 * gate/up/down fixed-sum subset metadata can be merged into a staged full-MLP calibration JSON because `msd_calibration_data` is keyed by projection module name;
 * fixed-sum calibrated MSD PPL uses generated `msd_calibration_data` from `calibrate.py --optimizer fixed_sum --target-snr ...` and completes a Qwen3-8B smoke;
 * WANDA and activation n:m baseline runners use the same GPU visibility, allocator, chunk/cache, `use_cache=False`, and PPL loss/window semantics as `ppltest.py`;
+* WANDA and activation N:M use common keep-count notation: `N:M` means keep `N` values per group of `M`; internally this prunes `(M-N):M`;
+* MSD target-finding utilization probes use `ppltest.py --msd-utilization-mode`;
+  this is the standard 100-sample lite-stat mode and excludes Figure 5 cycle
+  collection unless `--figure5-layer-cycles` is explicitly requested;
 * prefix80 Qwen3-8B measurements exist for staged full-MLP fixed-sum calibrated MSD, WANDA, and activation n:m; OOM feasibility is established, but fixed-sum calibrated MSD runtime is the main remaining optimization target;
 * small-layer exact MX test passes without changing old MX math.

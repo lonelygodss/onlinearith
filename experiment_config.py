@@ -173,6 +173,22 @@ def _require_positive_int(name: str, value: object, setup_id: int, tag: str) -> 
         raise ValueError(f"Setup {setup_id}/{tag}: {name} must be a positive integer, got {value!r}")
 
 
+def validate_nm_keep_ratio(n: int, m: int, *, label: str = "n:m") -> None:
+    """Validate common N:M structured sparsity notation, where N is kept per M."""
+    if not isinstance(m, int) or m <= 0:
+        raise ValueError(f"{label}: m must be a positive integer, got {m!r}")
+    if not isinstance(n, int) or n < 0:
+        raise ValueError(f"{label}: n must be a non-negative integer, got {n!r}")
+    if n > m:
+        raise ValueError(f"{label}: common N:M notation requires n <= m, got n={n}, m={m}")
+
+
+def nm_keep_to_prune_count(n: int, m: int) -> int:
+    """Return the number to prune for common N:M notation, where N is kept."""
+    validate_nm_keep_ratio(n, m)
+    return m - n
+
+
 def validate_setup_definition(setup: tuple[int, str, str, dict]) -> None:
     """Validate one setup tuple against the registered custom config fields."""
     if not (isinstance(setup, tuple) and len(setup) == 4):
@@ -213,8 +229,11 @@ def validate_setup_definition(setup: tuple[int, str, str, dict]) -> None:
     if active_config["use_activation_nm_sparsity"]:
         _require_positive_int("activation_nm_n", active_config["activation_nm_n"], setup_id, tag)
         _require_positive_int("activation_nm_m", active_config["activation_nm_m"], setup_id, tag)
-        if active_config["activation_nm_n"] > active_config["activation_nm_m"]:
-            raise ValueError(f"Setup {setup_id}/{tag}: activation_nm_n must be <= activation_nm_m")
+        validate_nm_keep_ratio(
+            active_config["activation_nm_n"],
+            active_config["activation_nm_m"],
+            label=f"Setup {setup_id}/{tag} activation N:M",
+        )
 
     if active_config["use_msd_truncation"]:
         for field in ("msd_cycle_budget", "msd_online_delay", "msd_pipeline_precision_loss"):
@@ -314,7 +333,7 @@ def get_active_flags(config) -> str:
     if getattr(config, "use_activation_nm_sparsity", False):
         n = getattr(config, "activation_nm_n", 2)
         m = getattr(config, "activation_nm_m", 4)
-        parts.append(f"ACT N:M {n}:{m}")
+        parts.append(f"ACT N:M keep {n}:{m}")
 
     # MSD
     if getattr(config, "use_msd_truncation", False):

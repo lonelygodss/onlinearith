@@ -6,8 +6,8 @@ For each scan point, this script runs two stages in order:
 2) ppl_batch_base.py (evaluate PPL using those masks)
 
 Supported modes:
-- n:m scan mode: iterate over multiple n:m pairs.
-- calibration-size scan mode: keep one n:m fixed, iterate over multiple
+- N:M scan mode: iterate over multiple common keep-count N:M pairs.
+- calibration-size scan mode: keep one N:M fixed, iterate over multiple
     calibration sizes (--num-texts), using an auto-generated output hook so
     each run reads/writes distinct files.
 
@@ -33,11 +33,11 @@ PPL_SCRIPT = SCRIPT_DIR / "ppl_batch_base.py"
 
 
 def parse_nm(token: str) -> tuple[int, int]:
-    """Parse one n:m token. Accepted separators: ':', ',', '-' and optional parentheses."""
+    """Parse one common N:M token, where N is kept. Separators: ':', ',', '-'."""
     match = re.fullmatch(r"\(?\s*(\d+)\s*[:,-]\s*(\d+)\s*\)?", token.strip())
     if not match:
         raise argparse.ArgumentTypeError(
-            f"Invalid n:m pair '{token}'. Use forms like 2:4, 2,4, 2-4, or (2,4)."
+            f"Invalid N:M pair '{token}'. Use forms like 2:4, 2,4, 2-4, or (2,4)."
         )
 
     n = int(match.group(1))
@@ -47,8 +47,8 @@ def parse_nm(token: str) -> tuple[int, int]:
         raise argparse.ArgumentTypeError(f"Invalid pair '{token}': m must be > 0.")
     if n < 0:
         raise argparse.ArgumentTypeError(f"Invalid pair '{token}': n must be >= 0.")
-    if n >= m:
-        raise argparse.ArgumentTypeError(f"Invalid pair '{token}': require n < m.")
+    if n > m:
+        raise argparse.ArgumentTypeError(f"Invalid pair '{token}': common N:M requires n <= m.")
 
     return n, m
 
@@ -104,7 +104,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
             "Single-GPU sequential scan runner for wanda_base calibration+PPL flow "
-            "(supports n:m scan and calibration-size scan; defaults to MXFP8 via --only 1)."
+            "(supports common N:M scan and calibration-size scan; defaults to MXFP8 via --only 1)."
         )
     )
     parser.add_argument(
@@ -114,7 +114,7 @@ def main() -> None:
         default=None,
         type=parse_nm,
         metavar="N:M",
-        help="n:m scan mode list, e.g. -nm 2:4 1:4 (or 2,4 / 2-4 / (2,4)).",
+        help="Common N:M keep-ratio scan list, e.g. -nm 2:4 1:4 (or 2,4 / 2-4 / (2,4)).",
     )
     parser.add_argument(
         "--num-texts-scan",
@@ -178,8 +178,8 @@ def main() -> None:
         raise SystemExit("ERROR: -n must be >= 0.")
     if args.m <= 0:
         raise SystemExit("ERROR: -m must be > 0.")
-    if args.n >= args.m:
-        raise SystemExit("ERROR: require n < m.")
+    if args.n > args.m:
+        raise SystemExit("ERROR: common N:M requires n <= m.")
 
     if args.gpus is not None and "," in args.gpus:
         raise SystemExit("ERROR: this scan mode accepts only one GPU ID.")
@@ -193,14 +193,14 @@ def main() -> None:
 
     if has_nm_mode:
         unique_pairs = _dedupe_keep_order(args.nm)
-        print(f"[scan] Mode: n:m scan")
-        print(f"[scan] Total unique n:m pairs: {len(unique_pairs)}")
+        print(f"[scan] Mode: common N:M keep-ratio scan")
+        print(f"[scan] Total unique N:M pairs: {len(unique_pairs)}")
 
         summary: list[tuple[int, int, int, float, int, float]] = []
 
         for i, (n, m) in enumerate(unique_pairs, start=1):
             print()
-            print(f"[scan] ({i}/{len(unique_pairs)}) n={n}, m={m}")
+            print(f"[scan] ({i}/{len(unique_pairs)}) keep {n}:{m} (prune {m - n}:{m})")
 
             calibrate_cmd = [
                 sys.executable,
@@ -297,7 +297,7 @@ def main() -> None:
     shared_hook = args.output_hook.strip()
 
     print("[scan] Mode: calibration-size scan")
-    print(f"[scan] Fixed n:m: {args.n}:{args.m}")
+    print(f"[scan] Fixed N:M: keep {args.n}:{args.m} (prune {args.m - args.n}:{args.m})")
     print(f"[scan] Setup ID : {args.only[0]}")
     print(f"[scan] Num-texts points: {num_texts_values}")
     if shared_hook:

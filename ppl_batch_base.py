@@ -73,7 +73,7 @@ from experiment_config import (
     BASELINE_CONFIG, apply_config, reset_to_baseline,
     reconfigure_mlp_layers, get_config_snapshot, get_active_flags,
     format_config_banner,peak_memory_str,
-    reset_peak_memory,
+    reset_peak_memory, validate_nm_keep_ratio,
 )
 from runtime_paths import default_model_path, describe_missing_model_path, normalize_output_dir
 
@@ -241,8 +241,8 @@ def main():
     parser.add_argument("--list", action="store_true", help="List all setups and exit")
     parser.add_argument("--only", nargs="+", type=int, metavar="ID",
                         help="Run only these setup IDs (e.g. --only 1 6 10)")
-    parser.add_argument("-n", type=int, default=2, help="Sparsify n elements")
-    parser.add_argument("-m", type=int, default=4, help="Group size")
+    parser.add_argument("-n", type=int, default=2, help="Common N:M keep count: keep n elements in each m-group")
+    parser.add_argument("-m", type=int, default=4, help="Common N:M group size")
     parser.add_argument("--force", action="store_true",
                         help="Re-run even if result file already exists")
     parser.add_argument("--nproc", type=int, default=None, metavar="N",
@@ -259,6 +259,10 @@ def main():
     args = parser.parse_args()
     MODEL_PATH = args.model_path
     RESULTS_ROOT = normalize_output_dir(args.results_root, RESULTS_ROOT)
+    try:
+        validate_nm_keep_ratio(args.n, args.m, label="baseline N:M")
+    except ValueError as exc:
+        raise SystemExit(f"ERROR: {exc}") from exc
 
     if args.complete:
         exit_code = run_complete_mode(args)

@@ -1,5 +1,5 @@
 """
-Run activation-only n:m PPL batches over multiple (n, m) pairs.
+Run activation-only common N:M PPL batches over multiple (n, m) pairs.
 
 Usage:
     cd /path/to/onlinearith
@@ -22,11 +22,11 @@ RUNNER = SCRIPT_DIR / "ppl_batch_base_act.py"
 
 
 def parse_nm(token: str) -> tuple[int, int]:
-    """Parse one n:m token. Accepted separators: ':', ',', '-' and optional parentheses."""
+    """Parse one common N:M token, where N is kept. Separators: ':', ',', '-'."""
     match = re.fullmatch(r"\(?\s*(\d+)\s*[:,-]\s*(\d+)\s*\)?", token.strip())
     if not match:
         raise argparse.ArgumentTypeError(
-            f"Invalid n:m pair '{token}'. Use forms like 2:4, 2,4, 2-4, or (2,4)."
+            f"Invalid N:M pair '{token}'. Use forms like 2:4, 2,4, 2-4, or (2,4)."
         )
 
     n = int(match.group(1))
@@ -36,15 +36,15 @@ def parse_nm(token: str) -> tuple[int, int]:
         raise argparse.ArgumentTypeError(f"Invalid pair '{token}': m must be > 0.")
     if n < 0:
         raise argparse.ArgumentTypeError(f"Invalid pair '{token}': n must be >= 0.")
-    if n >= m:
-        raise argparse.ArgumentTypeError(f"Invalid pair '{token}': require n < m.")
+    if n > m:
+        raise argparse.ArgumentTypeError(f"Invalid pair '{token}': common N:M requires n <= m.")
 
     return n, m
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Single-GPU sequential sweep of activation-only ppl_batch_base_act over multiple n:m pairs."
+        description="Single-GPU sequential sweep of activation-only ppl_batch_base_act over common N:M pairs."
     )
     parser.add_argument(
         "--nm",
@@ -53,7 +53,7 @@ def main() -> None:
         required=True,
         type=parse_nm,
         metavar="N:M",
-        help="List of n:m pairs, e.g. --nm 2:4 1:4 (or 2,4 / 2-4 / (2,4)).",
+        help="List of common N:M keep ratios, e.g. --nm 2:4 1:4 (or 2,4 / 2-4 / (2,4)).",
     )
     parser.add_argument(
         "--only",
@@ -104,7 +104,7 @@ def main() -> None:
             unique_pairs.append(pair)
 
     print(f"[scan] Runner: {RUNNER}")
-    print(f"[scan] Total unique n:m pairs: {len(unique_pairs)}")
+    print(f"[scan] Total unique common N:M pairs: {len(unique_pairs)}")
 
     summary: list[tuple[int, int, int, float]] = []
     for i, (n, m) in enumerate(unique_pairs, start=1):
@@ -127,7 +127,7 @@ def main() -> None:
         cmd.extend(["--only", *[str(sid) for sid in args.only]])
 
         print()
-        print(f"[scan] ({i}/{len(unique_pairs)}) n={n}, m={m}")
+        print(f"[scan] ({i}/{len(unique_pairs)}) keep {n}:{m} (prune {m - n}:{m})")
         print(f"[scan] Command: {' '.join(cmd)}")
 
         t0 = time.perf_counter()
@@ -144,13 +144,13 @@ def main() -> None:
 
     print()
     print("[scan] Summary")
-    print(f"{'n':>3}  {'m':>3}  {'exit':>4}  {'time':>8}")
+    print(f"{'keep':>4}  {'m':>3}  {'exit':>4}  {'time':>8}")
     print("-" * 28)
     any_fail = False
     for n, m, code, elapsed in summary:
         if code != 0:
             any_fail = True
-        print(f"{n:3d}  {m:3d}  {code:4d}  {elapsed:7.1f}s")
+        print(f"{n:4d}  {m:3d}  {code:4d}  {elapsed:7.1f}s")
 
     if any_fail:
         raise SystemExit(1)

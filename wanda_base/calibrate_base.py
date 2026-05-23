@@ -41,7 +41,14 @@ from dist_utils import (
     restrict_gpus,
     maybe_relaunch_with_torchrun,
 )
-from experiment_config import apply_config, clear_mxfp_weight_cache, reconfigure_mlp_layers, reset_to_baseline
+from experiment_config import (
+    apply_config,
+    clear_mxfp_weight_cache,
+    nm_keep_to_prune_count,
+    reconfigure_mlp_layers,
+    reset_to_baseline,
+    validate_nm_keep_ratio,
+)
 from runtime_paths import describe_missing_model_path, normalize_output_dir
 
 # ── Configuration ──
@@ -75,6 +82,9 @@ def _calibration_filename(tag: str, output_hook: str) -> str:
 
 
 def calibrate_baseline_sparsify(model, tokenizer, calibration_texts, n=2, m=4, max_length=512, batch_size=4):
+    """Build WANDA masks for common N:M notation, keeping n values per m-group."""
+    validate_nm_keep_ratio(n, m, label="WANDA N:M")
+    prune_n = nm_keep_to_prune_count(n, m)
     device = next(model.parameters()).device
     
     # 1. Register forward pre-hooks to accurately accumulate X norms
@@ -130,7 +140,8 @@ def calibrate_baseline_sparsify(model, tokenizer, calibration_texts, n=2, m=4, m
             # S_ij = |W_ij| * ||X_j||_2  which is shape (Cout, Cin).
             S = torch.abs(w_quantized) * x_norm_sqrt.unsqueeze(0)
             
-            # 4. Perform n:m sparsity over the row (Cout output neurons)
+            # 4. Perform common N:M sparsity over the row (Cout output neurons):
+            # keep n values per m-group, which means pruning (m - n) values.
             # m divides Cin
             # We skip channels if they don't match, or pad them temporarily (usually they perfectly match for Qwen models).
             if S.shape[1] % m != 0:
@@ -139,9 +150,9 @@ def calibrate_baseline_sparsify(model, tokenizer, calibration_texts, n=2, m=4, m
                 
             S_reshaped = S.view(S.shape[0], -1, m)
             
-            # Identify the n elements with the SMALLEST scores in each group, and prune them
+            # Identify the (m - n) elements with the SMALLEST scores in each group, and prune them.
             _, indices = torch.sort(S_reshaped, dim=-1)
-            prune_indices = indices[:, :, :n]
+            prune_indices = indices[:, :, :prune_n]
             
             # create mask
             mask_reshaped = torch.ones_like(S_reshaped, dtype=torch.bool)
@@ -167,8 +178,8 @@ def main():
     parser.add_argument("--num-texts", type=int, default=2048, help="Number of paragraphs for calibration")
     parser.add_argument("--max-length", type=int, default=512, help="Max sequence length")
     parser.add_argument("--batch-size", type=int, default=4, help="Batch size for forward hook accumulation")
-    parser.add_argument("-n", type=int, default=2, help="Sparsify n elements in each group")
-    parser.add_argument("-m", type=int, default=4, help="Group size for structured sparsification")
+    parser.add_argument("-n", type=int, default=2, help="Common N:M keep count: keep n elements in each m-group")
+    parser.add_argument("-m", type=int, default=4, help="Common N:M group size")
     parser.add_argument("--force", action="store_true", help="Overwrite existing calibration files")
     parser.add_argument("--nproc", type=int, default=1, help="Auto-launch torchrun with N processes")
     parser.add_argument("--gpus", type=str, default="", help="Comma-separated list of GPUs to use")
@@ -188,6 +199,10 @@ def main():
                         help=f"Root directory for Wanda baseline outputs (default: {WORKSPACE_ROOT / 'data' / 'wanda_base'})")
     
     args, unparsed = parser.parse_known_args()
+    try:
+        validate_nm_keep_ratio(args.n, args.m, label="WANDA N:M")
+    except ValueError as exc:
+        raise SystemExit(f"ERROR: {exc}") from exc
     model_path = args.model_path
     results_root = normalize_output_dir(args.results_root, (WORKSPACE_ROOT / "data" / "wanda_base").resolve())
     output_hook = _normalize_output_hook(args.output_hook)
@@ -235,7 +250,7 @@ def main():
         RESULTS_DIR.mkdir(parents=True, exist_ok=True)
         print(f"World size: {world_size}  |  Device: {device}  |  dtype: {dtype}")
         print(f"Total setups: {len(run_setups)}  |  Setups on this rank: {len(my_setups)}")
-        print(f"Struct sparsification: {args.n}:{args.m}")
+        print(f"Struct sparsification: keep {args.n}:{args.m} (prune {args.m - args.n}:{args.m})")
         if output_hook:
             print(f"Output hook: {output_hook}")
         print(f"Output directory: {RESULTS_DIR}")

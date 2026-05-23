@@ -173,7 +173,8 @@ examples:
   python ppltest.py --nproc 4 --gpus 4,5,6,7 --setup 6    # specific GPUs
   python ppltest.py --setup 6 --limit-samples 20          # light mode: fast run
   python ppltest.py --setup 6 --calibration calibration_MXFP8.json
-  python ppltest.py --setup 6 --calibration calibration_MXFP8.json --lite  # fast stats
+  python ppltest.py --setup 6 --calibration calibration_MXFP8.json --msd-utilization-mode
+                                                                    # standard util probe
 
 calibration workflow:
   1. python calibrate.py --setup 1          # produce calibration_MXFP8.json
@@ -225,6 +226,11 @@ calibration workflow:
     parser.add_argument("--stats", choices=["off", "lite", "full"], default="off",
                         help="MSD performance-statistics mode for PPL runs. "
                              "--lite maps to --stats lite. (default: off)")
+    parser.add_argument("--msd-utilization-mode", action="store_true",
+                        help="Standard MSD target-finding mode: enable lite utilization "
+                             "statistics, default --limit-samples to 100 when omitted, "
+                             "and avoid Figure 5 cycle collection unless "
+                             "--figure5-layer-cycles is explicitly requested.")
     parser.add_argument("--mx-chunk-target-mib", type=int, default=None,
                         help="Exact MX-only output chunk target in MiB.")
     parser.add_argument("--msd-chunk-target-mib", type=int, default=None,
@@ -246,6 +252,10 @@ calibration workflow:
     model_path = args.model_path
     results_root = normalize_output_dir(args.results_dir, RESULTS_ROOT)
 
+    if args.msd_utilization_mode:
+        args.stats = "lite"
+        if args.limit_samples is None:
+            args.limit_samples = 100
     if args.lite:
         args.stats = "lite"
     auto_enabled_lite = args.figure5_layer_cycles and args.stats != "lite"
@@ -605,7 +615,9 @@ calibration workflow:
                        "world_size": world_size,
                        "calibration_file": args.calibration if args.calibration else None,
                        "text_manifest": str(manifest_path) if manifest_path else None,
-                       "stats": args.stats},
+                       "stats": args.stats,
+                       "msd_utilization_mode": bool(args.msd_utilization_mode),
+                       "figure5_layer_cycles": bool(args.figure5_layer_cycles)},
             "config_snapshot": get_config_snapshot(model.config),
             "metrics": {
                 "token_perplexity": round(token_ppl, 4),

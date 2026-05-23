@@ -161,6 +161,11 @@ The paper-critical paths are:
    `wanda_base/ppl_batch_base.py`.
 5. Runtime activation n:m baseline: `act_base/ppl_batch_base_act.py`.
 
+For both baseline sparsity paths, use common N:M notation: `N:M` means keep
+`N` values per group of `M`. The implementation prunes `(M - N):M` internally.
+Historical result directories generated before this convention fix may need
+manual relabeling before comparison.
+
 Current status at the start of this phase:
 
 * MX-only and uniform MSD paths have the main Qwen3-8B memory controls:
@@ -252,3 +257,6 @@ Phase 5 status after the latest iteration:
   should prioritize calibrated-MSD runtime: the fixed-sum prefix80 path is about
   60x slower than WANDA/activation on the same prefix while staying within the
   memory budget.
+* The focused Qwen3 experiment-family time estimate is tracked in
+  `docs/experiments_time_estimates.md`. Update it after each accepted runtime
+  optimization or full direct-CUDA timing run.

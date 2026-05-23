@@ -85,6 +85,25 @@ Path parity status:
 - Runtime activation n:m baseline runner parity is implemented for
   `act_base/ppl_batch_base_act.py` with the same PPL/runtime controls as WANDA.
   WANDA and activation prefix80 runs have passed; final measurements remain.
+- Baseline sparsity notation has been corrected to common N:M keep-count
+  semantics. `-n 2 -m 4` means keep 2 of 4; internally the old prune-count
+  behavior is `(m - n):m`. This matters for asymmetric sweeps such as `1:4`.
+- A living single-setup estimate table for the focused model/config family is
+  in `docs/experiments_time_estimates.md`. It includes Qwen3-0.6B, 1.7B, 4B,
+  and 8B, one representative 50% point per path, and current single-GPU runtime
+  estimates. Sweeps and multi-GPU estimates are intentionally deferred.
+- For MSD "50% sparsity", use measured
+  `msd_perf_stats.global.global_utilization ~= 0.5`, not a fixed target-SNR.
+  Existing 0.6B fixed-sum `_fix_cap`/`_fix_time` artifacts only reach about
+  0.225 utilization at 30 dB, so a small target-finding pilot is still needed.
+  Those old files were produced with `ppltest.py --setup 6 --calibration ...
+  --lite --output ..._fix_time.json --limit-samples 100
+  --figure5-layer-cycles --gpus <id>` and were later removed by commit
+  `e0a38ec908233cbbf21c56262e5b79963a212660`; do not restore them. For new
+  target-finding pilots use the cleaned standard mode:
+  `ppltest.py --setup 6 --calibration ... --msd-utilization-mode --output
+  ..._fix_time.json --gpus <id>`. Add `--figure5-layer-cycles` only when
+  explicitly debugging Figure 5 cycle accounting.
 
 Valid GPU measurements:
 - Setup 2 probe, seq_len=4096: status ok; peak_alloc=27.6147 GiB;
@@ -248,6 +267,7 @@ Recommended next steps:
    ../.venv3_10/bin/python test_mxfp8linear.py
    ../.venv3_10/bin/python test_fixed_sum_optimizer.py
    ../.venv3_10/bin/python calibrate.py --list
+   ../.venv3_10/bin/python tests/test_nm_keep_semantics.py
 3. Treat the current stage as done for single-GPU OOM feasibility across the
    paper-critical paths: MX-only, uniform MSD, fixed-sum calibrated MSD,
    WANDA, and activation n:m have direct-CUDA Qwen3-8B evidence. The fixed-sum
