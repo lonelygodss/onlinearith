@@ -80,9 +80,24 @@ Two sharded bugs were fixed during this validation:
   final hidden states. The loss accumulator now follows the actual
   `lm_head`/cross-entropy output device.
 
-Next required validation before accepting multi-GPU timing estimates: run a
-non-final sharded prefix large enough to include a 4096-token context window,
-then compare scored tokens and PPL with the non-sharded run.
+2026-05-24 direct-CUDA prefix validation on Qwen3-8B setup 2 covered a
+`--limit-samples 80` WikiText-2 prefix with 4,144 tokens and two PPL windows,
+including one full 4,096-token context window. The single-GPU reference used
+physical GPU 4. The sharded comparison used physical GPUs 4,5,6,7 visible with
+`--device-map sequential --max-memory 0:12GiB,1:12GiB,2:12GiB,3:12GiB`; the
+resolved map placed layers on visible CUDA devices 0 and 1.
+
+| Model | Setup | Path | Scored tokens | Token PPL | Mean NLL | Wall time | CUDA peak allocation |
+|---|---:|---|---:|---:|---:|---:|---|
+| Qwen3-8B | 2 | single GPU, `--device-map none` | 4,144 | 8.8440 | 2.1797 | 31.97s | cuda:0 27.6147 GiB |
+| Qwen3-8B | 2 | sequential sharded, visible GPUs 4-7 | 4,144 | 8.8440 | 2.1797 | 31.80s | cuda:0 19.8733 GiB; cuda:1 9.3105 GiB; cuda:2/3 0.0 GiB |
+
+Interpretation: explicit single-process model sharding now has prefix-level
+correctness evidence on Qwen3-8B MXFP8 with an actual 4,096-token context
+window. The initial sequential placement lowered per-GPU memory but did not
+materially change MXFP8 wall time on this two-window prefix. Next validation:
+repeat the prefix comparison for setup 6 or calibrated fixed-sum MSD before
+accepting sharded MSD wall-time estimates.
 
 ## Fixed-Sum Calibration Evidence
 

@@ -33,13 +33,21 @@ Current principles:
   result JSON and must be validated with direct CUDA before timing estimates
   are accepted.
 
+Current status:
+- Qwen3-8B setup 2 MXFP8 has direct-CUDA prefix80 validation with one full
+  4096-token context window. Sequential model sharding matched single-GPU
+  scored tokens and PPL exactly at recorded precision.
+- The initial sequential map used physical GPUs 4-7 as visible devices but
+  placed layers on visible CUDA 0 and 1 only. It lowered per-GPU memory but did
+  not materially improve MXFP8 prefix wall time.
+
 Next iteration:
-1. Run a non-final sharded prefix large enough to include a 4096-token context
-   window, then compare scored tokens and PPL with the non-sharded run.
+1. Repeat non-final prefix validation for the slow MSD path, starting with setup
+   6 and then fixed-sum target-SNR 30 dB if calibrated metadata is available.
 2. Keep `--device-map` single-process and separate from `--nproc`; use
    visible-device IDs in `--max-memory` after `--gpus` filtering.
-3. Update `docs/qwen3_final_experiments/runtime_estimates.md` with measured
-   single-GPU and sharded multi-GPU wall-time evidence.
+3. Update `docs/qwen3_final_experiments/runtime_estimates.md` only with
+   accepted direct-CUDA sharded evidence, clearly labeling prefix extrapolations.
 ```
 
 Do not add run logs here. Put measurements in `references/evidence_log.md` and

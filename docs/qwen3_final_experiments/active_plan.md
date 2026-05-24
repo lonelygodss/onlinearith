@@ -31,12 +31,13 @@ Representative paths:
 
 ## Current Work
 
-1. Validate `ppltest.py --device-map {auto,sequential,balanced}` on a
-   non-final prefix large enough to include a 4096-token context window.
+1. Repeat Qwen3-8B prefix validation for the slow MSD path, starting with setup
+   6 and then fixed-sum target-SNR 30 dB if calibrated metadata is available.
 2. Extend the same explicit placement discipline to calibration only after PPL
    sharding is validated.
 3. Update `docs/qwen3_final_experiments/runtime_estimates.md` with measured
-   single-GPU and multi-GPU wall-time estimates.
+   single-GPU and multi-GPU wall-time estimates as each representative path is
+   validated.
 4. Keep generated calibration/result artifacts out of commits unless explicitly
    requested.
 

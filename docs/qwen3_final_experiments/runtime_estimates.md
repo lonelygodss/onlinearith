@@ -166,6 +166,10 @@ calibrated MSD, "calibration" means one fixed-sum calibration at target-SNR
 Basis:
 
 - Full WikiText-2 PPL is about 299k scored tokens.
+- Qwen3-8B MXFP8 setup 2 prefix80 measured 4144 tokens in 31.97s on one GPU
+  and 31.80s with explicit sequential model sharding across two active visible
+  CUDA devices. This extrapolates to about 0.64 h for full PPL either way; the
+  sharded benefit in this probe is per-GPU memory, not throughput.
 - Qwen3-8B calibrated/uniform MSD prefix80 measured 4144 tokens in about 1999s,
   which extrapolates to about 40 h for full PPL at the current runtime.
 - Qwen3-8B WANDA and activation prefix80 measured about 32-33s on the same 4144
@@ -177,13 +181,12 @@ Basis:
 
 ## Multi-GPU Estimate Status
 
-No model-sharded timing is accepted yet. Add rows here only after the explicit
-model-sharding mode passes the validation ladder in
-`docs/qwen3_final_experiments/references/multigpu_sharding_plan.md`.
+Model-sharded MXFP8 has prefix-level correctness and timing evidence. MSD,
+WANDA, and activation N:M sharded timings are still pending.
 
 | Model | Path | Sharding mode | GPUs | Evidence | Wall-time estimate |
 |---|---|---|---:|---|---:|
-| Qwen3-8B | MXFP8 PPL | pending | pending | not validated | pending |
+| Qwen3-8B | MXFP8 PPL | sequential | 2 active of 4 visible | non-final prefix80, exact PPL parity with single GPU; peak alloc 19.8733 + 9.3105 GiB | about 0.64 h, non-final extrapolation |
 | Qwen3-8B | Fixed-sum MSD 30 dB PPL | pending | pending | not validated | pending |
 | Qwen3-8B | WANDA 2:4 | pending | pending | not validated | pending |
 | Qwen3-8B | Activation N:M 2:4 | pending | pending | not validated | pending |
