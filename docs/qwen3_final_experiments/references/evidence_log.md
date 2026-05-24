@@ -52,17 +52,18 @@ runtime remains the main bottleneck.
 
 ## Full-Replica Data-Parallel PPL Evidence
 
-2026-05-24 direct-CUDA `ppltest.py --nproc 2` validation used physical GPUs
-4,5 and the same Qwen3-8B prefix80 WikiText-2 slice as the single-GPU and
-model-sharded evidence above. This is data-parallel window sharding with one
-full model replica per worker, not model sharding. Result JSONs record rank-0
-CUDA memory only; use the wall time and PPL for this validation, not
+2026-05-24 direct-CUDA `ppltest.py --nproc` validation used idle RTX 5090 GPUs
+and Qwen3-8B WikiText-2 prefixes. This is data-parallel window sharding with
+one full model replica per worker, not model sharding. Result JSONs record
+rank-0 CUDA memory only; use the wall time and PPL for this validation, not
 multi-rank memory accounting.
 
 | Model | Path | Command detail | Scored tokens | Token PPL | Mean NLL | Wall time | Rank-0 peak allocation |
 |---|---|---|---:|---:|---:|---:|---|
 | Qwen3-8B | setup 2 MXFP8 | `--nproc 2 --gpus 4,5 --stats off` | 4,144 | 8.8440 | 2.1797 | 17.02s | cuda:0 27.6147 GiB |
 | Qwen3-8B | fixed-sum 30 dB | `--nproc 2 --gpus 4,5 --stats off --compile-msd-truncate --weight-cache-dtype float8` | 4,144 | 8.8632 | 2.1819 | 1120.41s | cuda:0 25.0613 GiB |
+| Qwen3-8B | setup 2 MXFP8 | `--nproc 4 --gpus 0,1,2,3 --limit-samples 120 --stats off` | 7,192 | 9.8221 | 2.2846 | 33.2s | cuda:0 27.6147 GiB |
+| Qwen3-8B | fixed-sum 30 dB | `--nproc 4 --gpus 0,1,2,3 --limit-samples 120 --stats off --compile-msd-truncate --weight-cache-dtype float8` | 7,192 | 9.8648 | 2.2890 | 2239.0s | cuda:0 25.0613 GiB |
 
 The fixed-sum run used
 `/tmp/onlinearith_calib_mlp_merged_smoke/calibration_MXFP8_fixed_sum_qwen8b_mlp_merged_snr30_smoke_nocache.json`,
@@ -74,11 +75,24 @@ before failing on a 1.50 GiB allocation in `_forward_msd_truncated`. Therefore
 the current Qwen3-8B MSD full-replica multi-GPU recipe should include
 `--weight-cache-dtype float8`.
 
+The four-worker prefix120 runs contain eight PPL windows, so each rank processed
+two real windows without padding. The fixed-sum four-worker runtime stayed
+consistent with the two-worker float8-cache result at about 1120s per assigned
+long forward window.
+
+An eight-worker MXFP8 launch on GPUs 0-7 with the same prefix120 slice failed
+before evaluation: rank 0 was killed with `SIGKILL` during model
+loading/materialization and no output JSON was produced. The GPUs were idle
+before launch (`nvidia-smi` reported about 15 MiB used and 32095 MiB free on
+each of GPUs 0-7), so this is currently a launch/load scaling issue, not a PPL
+correctness or CUDA-forward failure.
+
 Interpretation: `--nproc` is now prefix-validated for Qwen3-8B MXFP8 and
-fixed-sum MSD PPL quality. MXFP8 speedup is close to 2x on two windows
-(31.97s single GPU versus 17.02s with two workers). Fixed-sum MSD preserves PPL
-and avoids OOM with float8 cache; the two-worker prefix wall time is 1120.41s,
-which should be scaled by assigned forward windows for full-run estimates.
+fixed-sum MSD PPL quality up to four full replicas. MXFP8 speedup is close to
+2x on the two-window prefix80 case (31.97s single GPU versus 17.02s with two
+workers). Fixed-sum MSD preserves PPL and avoids OOM with float8 cache. The
+validated full-run estimate should use four workers until the eight-replica
+launch/load SIGKILL is understood.
 
 ## Model-Sharded PPL Smoke Evidence
 

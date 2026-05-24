@@ -28,6 +28,11 @@ projection-filter behavior.
   float8` unless newer evidence supersedes it. A two-worker fixed-sum prefix
   run with the default float16 persistent cache OOMed, while the float8-cache
   run preserved PPL and completed.
+- Qwen3-8B full-replica `--nproc` is validated up to four workers for MXFP8
+  and fixed-sum 30 dB MSD. An eight-worker MXFP8 launch on GPUs 0-7 SIGKILLed
+  during model loading/materialization before evaluation, so validate launch
+  scale separately from PPL correctness before using eight workers for final
+  estimates.
 - Do not report current `--nproc` `msd_perf_stats` as a full-dataset aggregate:
   nonzero ranks disable MSD stats. Add explicit stats aggregation or use a
   separate single-process accounting run for work metrics.

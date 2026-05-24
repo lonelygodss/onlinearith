@@ -41,13 +41,20 @@ Current status:
 - Qwen3-8B setup 6 uniform MSD and fixed-sum target-SNR 30 dB also have
   direct-CUDA prefix80 validation with exact scored-token and PPL parity at
   recorded precision.
-- Qwen3-8B `ppltest.py --nproc 2` full-replica data-parallel PPL is now
-  prefix-validated for setup 2 MXFP8 and fixed-sum target-SNR 30 dB. MXFP8
-  matched prior PPL and ran in 17.02s versus 31.97s single-GPU. Fixed-sum
-  matched prior PPL and ran in 1120.41s with `--weight-cache-dtype float8`.
+- Qwen3-8B `ppltest.py --nproc` full-replica data-parallel PPL is now
+  prefix-validated for setup 2 MXFP8 and fixed-sum target-SNR 30 dB up to four
+  workers. MXFP8 prefix80 matched prior PPL and ran in 17.02s on two workers
+  versus 31.97s single-GPU; MXFP8 prefix120 ran in 33.2s on four workers.
+  Fixed-sum prefix80 matched prior PPL and ran in 1120.41s on two workers with
+  `--weight-cache-dtype float8`; fixed-sum prefix120 ran in 2239.0s on four
+  workers with the same float8 cache.
 - The same fixed-sum `--nproc 2` run with the default float16 persistent weight
   cache OOMed on rank 1. Use `--weight-cache-dtype float8` for Qwen3-8B MSD
   full-replica multi-GPU PPL unless a newer memory fix supersedes this.
+- An eight-worker MXFP8 launch on GPUs 0-7 failed before evaluation with rank-0
+  `SIGKILL` during model loading/materialization and produced no output JSON.
+  Treat four full replicas as the currently validated final-run ceiling until
+  the eight-replica startup/load issue is fixed.
 - WikiText-2 test tokenization is 299,078 tokens and 578 PPL forward windows
   at `MAX_LENGTH=4096`, `STRIDE=512`. Runtime estimates should scale from
   forward-window count, not from scored tokens, because almost all windows feed
@@ -58,9 +65,9 @@ Current status:
   1998.8s for the historical single-GPU prefix.
 
 Next iteration:
-1. Scale Qwen3-8B `ppltest.py --nproc` from the validated two-worker prefix
-   runs to a larger worker count. For MSD, include `--weight-cache-dtype
-   float8`.
+1. Decide whether to investigate the eight-replica loading SIGKILL or proceed
+   with four validated full replicas for final PPL wall-time runs. For MSD,
+   include `--weight-cache-dtype float8`.
 2. Treat `--device-map sequential` as memory relief only unless `balanced` or
    manual placement shows direct-CUDA speedup over single-GPU and `--nproc`.
 3. Remember that current `--nproc` disables MSD stats on nonzero ranks; use it

@@ -168,7 +168,7 @@ calibrated MSD, "calibration" means one fixed-sum calibration at target-SNR
 | Qwen3-0.6B | 5-20 min | 1.2 h measured | about 2 h | 10-30 min | 5-20 min |
 | Qwen3-1.7B | 10-30 min | 4.7 h estimated | about 8 h | 20-60 min | 10-30 min |
 | Qwen3-4B | 25-60 min | 11.9 h estimated | about 20 h | 1-2 h | 25-60 min |
-| Qwen3-8B | about 2.6 h single GPU; about 0.3 h on 8 full replicas | 24 h estimated single job; faster with projection-filtered task parallel jobs | about 160 h single GPU; about 23 h on 8 full replicas with float8 cache | about 2.6 h PPL plus 1.3-2 h mask calibration | about 2.7 h single GPU; about 0.3 h on 8 full replicas |
+| Qwen3-8B | about 2.6 h single GPU; about 0.67 h validated on 4 full replicas; about 0.34 h theoretical on 8 if launch is fixed | 24 h estimated single job; faster with projection-filtered task parallel jobs | about 160 h single GPU; about 45 h validated on 4 full replicas with float8 cache; about 23 h theoretical on 8 if launch is fixed | about 2.6 h PPL plus 1.3-2 h mask calibration | about 2.7 h single GPU; about 0.3 h on 8 full replicas if launch is fixed |
 
 Basis:
 
@@ -185,17 +185,28 @@ Basis:
 - Qwen3-8B MXFP8 setup 2 with `ppltest.py --nproc 2 --gpus 4,5 --stats off`
   on the same prefix80 slice matched single-GPU PPL exactly at recorded
   precision and reduced wall time from 31.97s to 17.02s.
+- Qwen3-8B MXFP8 setup 2 with `ppltest.py --nproc 4 --gpus 0,1,2,3
+  --limit-samples 120 --stats off` completed a prefix120 slice with eight PPL
+  windows in 33.2s. That is about 16.6s per assigned window, or about 0.67 h
+  for the full 578-window run on four workers. An eight-worker launch on GPUs
+  0-7 failed with rank-0 `SIGKILL` during model loading/materialization before
+  evaluation; the eight-worker estimate remains theoretical until that startup
+  issue is fixed.
 - Qwen3-8B calibrated/uniform MSD prefix80 measured 4144 tokens in about 1999s,
   or about 1000s per long forward window. The full-PPL estimate is therefore
-  about 160 h on one GPU, and about 20 h with eight full-replica data-parallel
-  PPL workers if scaling is close to ideal.
+  about 160 h on one GPU.
 - Qwen3-8B fixed-sum target-SNR 30 dB with `ppltest.py --nproc 2 --gpus 4,5
   --stats off --compile-msd-truncate --weight-cache-dtype float8` matched the
   prior prefix PPL exactly at recorded precision and completed in 1120.41s. A
   default float16-cache `--nproc 2` run OOMed on rank 1, so the current
-  multi-GPU MSD recipe should include `--weight-cache-dtype float8`. Scaling
-  the successful two-worker per-assigned-window time to 578 full PPL windows
-  gives about 22.7 h on eight workers.
+  multi-GPU MSD recipe should include `--weight-cache-dtype float8`.
+- Qwen3-8B fixed-sum target-SNR 30 dB with `ppltest.py --nproc 4 --gpus
+  0,1,2,3 --limit-samples 120 --stats off --compile-msd-truncate
+  --weight-cache-dtype float8` completed eight PPL windows in 2239.0s, again
+  about 1120s per assigned window. Scaling to 145 assigned windows per worker
+  for the full 578-window run gives about 45.1 h on four workers. Eight workers
+  would be about 22.7 h by assigned-window scaling, but that remains
+  theoretical until the eight-replica launch/load SIGKILL is resolved.
 - Qwen3-8B sequential model-sharded MSD prefix80 measured 4144 tokens in
   2120.60s for uniform setup 6 and 2111.13s for fixed-sum 30 dB. These
   extrapolate by window count to about 170.2 h and 169.5 h for full PPL.
@@ -216,14 +227,16 @@ Basis:
 Model-sharded MXFP8 and MSD have prefix-level correctness and timing evidence,
 but current sequential model sharding is memory relief rather than a speedup.
 The final PPL acceleration path should be full-replica data parallel window
-sharding with `ppltest.py --nproc`, after a direct-CUDA Qwen3-8B validation run.
+sharding with `ppltest.py --nproc` when full replicas fit. Qwen3-8B is
+validated up to four workers; eight-worker full-replica startup currently needs
+separate launch/load debugging.
 
 | Model | Path | Execution mode | GPUs | Evidence | Wall-time estimate |
 |---|---|---|---:|---|---:|
-| Qwen3-8B | MXFP8 PPL | `--nproc` full-replica window sharding | 2 validated; 8 planned | prefix80 exact PPL parity; 31.97s single GPU vs 17.02s with two workers | about 0.3 h on 8 workers if scaling holds |
-| Qwen3-8B | Fixed-sum MSD 30 dB PPL | `--nproc` full-replica window sharding with float8 cache | 2 validated; 8 planned | prefix80 exact PPL parity; default float16 cache OOMed; float8 cache completed in 1120.41s | about 22.7 h on 8 workers by assigned-window scaling |
-| Qwen3-8B | WANDA 2:4 PPL | `--nproc` full-replica window sharding | 8 planned | direct Qwen3-8B `--nproc` timing pending; single-GPU prefix has 15.93s/window | about 0.3 h if near-ideal |
-| Qwen3-8B | Activation N:M 2:4 PPL | `--nproc` full-replica window sharding | 8 planned | direct Qwen3-8B `--nproc` timing pending; single-GPU prefix has 16.52s/window | about 0.3 h if near-ideal |
+| Qwen3-8B | MXFP8 PPL | `--nproc` full-replica window sharding | 4 validated; 8 attempted but loading SIGKILLed | prefix80 exact PPL parity; prefix120 completed in 33.2s on four workers | about 0.67 h validated on 4 workers; about 0.34 h theoretical on 8 |
+| Qwen3-8B | Fixed-sum MSD 30 dB PPL | `--nproc` full-replica window sharding with float8 cache | 4 validated; 8 pending startup fix | prefix80 exact PPL parity; default float16 cache OOMed; prefix120 float8 cache completed in 2239.0s on four workers | about 45.1 h validated on 4 workers; about 22.7 h theoretical on 8 |
+| Qwen3-8B | WANDA 2:4 PPL | `--nproc` full-replica window sharding | 4 should be validated before final run; 8 blocked by startup fix | direct Qwen3-8B `--nproc` timing pending; single-GPU prefix has 15.93s/window | about 0.67 h on 4 workers if MXFP8-like scaling holds; about 0.3 h theoretical on 8 |
+| Qwen3-8B | Activation N:M 2:4 PPL | `--nproc` full-replica window sharding | 4 should be validated before final run; 8 blocked by startup fix | direct Qwen3-8B `--nproc` timing pending; single-GPU prefix has 16.52s/window | about 0.69 h on 4 workers if MXFP8-like scaling holds; about 0.3 h theoretical on 8 |
 | Qwen3-8B | MXFP8 PPL | `--device-map sequential` | 2 active of 4 visible | non-final prefix80, exact PPL parity with single GPU; peak alloc 19.8733 + 9.3105 GiB | about 2.6 h; memory relief only |
 | Qwen3-8B | Uniform MSD setup 6 PPL | `--device-map sequential` | 2 active of 4 visible | non-final prefix80, exact PPL parity with historical single GPU; peak alloc 26.6621 + 16.1289 GiB | about 170 h; memory relief only |
 | Qwen3-8B | Fixed-sum MSD 30 dB PPL | `--device-map sequential` | 2 active of 4 visible | non-final prefix80, exact PPL parity with historical single GPU; peak alloc 26.6621 + 16.1289 GiB | about 169 h; memory relief only |

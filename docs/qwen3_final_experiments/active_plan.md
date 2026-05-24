@@ -33,9 +33,12 @@ Representative paths:
 
 ## Current Work
 
-1. Scale full-replica data parallelism (`ppltest.py --nproc`) beyond the
-   validated two-worker Qwen3-8B prefix runs. Record it as window-sharded data
-   parallel evaluation, not model parallelism. For Qwen3-8B MSD, include
+1. Use full-replica data parallelism (`ppltest.py --nproc`) as the final PPL
+   acceleration path when replicas fit. Qwen3-8B is prefix-validated up to four
+   full replicas for MXFP8 and fixed-sum 30 dB MSD. An eight-replica MXFP8
+   launch on GPUs 0-7 SIGKILLed during model loading/materialization before
+   evaluation, so either fix that startup/load issue or use four replicas as
+   the currently validated ceiling. For Qwen3-8B MSD, include
    `--weight-cache-dtype float8`; the default float16 persistent cache OOMed in
    a two-worker fixed-sum prefix run.
 2. Treat current `--device-map sequential` placement as memory relief only.
