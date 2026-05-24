@@ -30,31 +30,38 @@ Representative paths:
   replica per process. It is valid for final PPL wall-time acceleration when
   each selected GPU can fit a full replica, but it is not model sharding and
   is not an OOM solution.
+- Different model sizes may need different execution recipes. Before a full
+  final run, settle the model/path-specific recipe in
+  `model_execution_matrix.md` and validate it on a prefix with a full
+  4096-token context window.
 
 ## Current Work
 
 1. Use full-replica data parallelism (`ppltest.py --nproc`) as the final PPL
-   acceleration path when replicas fit. Qwen3-8B is prefix-validated up to four
-   full replicas for MXFP8 and fixed-sum 30 dB MSD. An eight-replica MXFP8
-   launch on GPUs 0-7 SIGKILLed during model loading/materialization before
-   evaluation, so either fix that startup/load issue or use four replicas as
-   the currently validated ceiling. For Qwen3-8B MSD, include
-   `--weight-cache-dtype float8`; the default float16 persistent cache OOMed in
-   a two-worker fixed-sum prefix run.
-2. Treat current `--device-map sequential` placement as memory relief only.
+   acceleration path when replicas fit. Qwen3-8B MXFP8 and fixed-sum 30 dB MSD
+   are prefix-validated on eight replicas when using `--load-stagger-sec 8`.
+   For Qwen3-8B MSD, include `--weight-cache-dtype float8`; the default float16
+   persistent cache OOMed in a two-worker fixed-sum prefix run.
+2. Use baseline-runner window sharding for the representative WANDA and
+   activation N:M baselines. `wanda_base/ppl_batch_base.py` and
+   `act_base/ppl_batch_base_act.py` need `--window-shard` with `--nproc` for a
+   single final setup; their default `--nproc` behavior shards setup IDs.
+   Qwen3-8B WANDA 2:4 and activation N:M 2:4 are prefix-validated on eight
+   replicas with `--window-shard --load-stagger-sec 8`.
+3. Treat current `--device-map sequential` placement as memory relief only.
    Do not claim model-parallel speedup unless `balanced` or a manual placement
    policy beats single-GPU and data-parallel timing with direct-CUDA evidence.
-3. Do not treat MSD stats from a current `--nproc` run as full-dataset work
+4. Do not treat MSD stats from a current `--nproc` run as full-dataset work
    aggregates: nonzero ranks disable MSD stats. Use `--nproc` for PPL quality
    and wall time, and use a separate single-process utilization/accounting run
    or add rank-level stats aggregation before reporting aggregate work metrics.
-4. For fixed-sum calibration, prefer task parallelism over model sharding:
+5. For fixed-sum calibration, prefer task parallelism over model sharding:
    run projection-filtered full-replica jobs on separate GPUs, then merge the
    resulting metadata with the established staged-calibration workflow.
-5. Update `docs/qwen3_final_experiments/runtime_estimates.md` with measured
+6. Update `docs/qwen3_final_experiments/runtime_estimates.md` with measured
    single-GPU and multi-GPU wall-time estimates as each representative path is
    validated.
-6. Keep generated calibration/result artifacts out of commits unless explicitly
+7. Keep generated calibration/result artifacts out of commits unless explicitly
    requested.
 
 ## Sharding Guardrails

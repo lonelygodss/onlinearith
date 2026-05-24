@@ -16,6 +16,11 @@ Setups are partitioned round-robin across ranks; each rank writes its
 result files independently (no inter-rank communication during eval).
 Rank 0 prints the summary after all ranks finish.
 
+For one selected setup, use `--window-shard` with `--nproc` to shard PPL
+windows across ranks instead of sharding setup IDs. This is the final-run
+acceleration path for a single representative WANDA baseline when full replicas
+fit.
+
 Loads the model ONCE per rank, then iterates through every assigned setup
 by patching config fields in-memory.  Each run's results are saved to
     ppl_results_{tag}.json
@@ -30,6 +35,7 @@ Usage:
     python wanda_base/ppl_batch_base.py --nproc 8                             # run all setups
     python wanda_base/ppl_batch_base.py --nproc 8 --list                      # list setups (rank 0)
     python wanda_base/ppl_batch_base.py --nproc 8 --only 1 6 10               # run only selected
+    python wanda_base/ppl_batch_base.py --nproc 8 --only 1 --window-shard     # shard one setup's PPL windows
     python wanda_base/ppl_batch_base.py --nproc 4 --gpus 4,5,6,7              # specific GPUs
     python wanda_base/ppl_batch_base.py --nproc 8 --force                     # re-run even if done
     python wanda_base/ppl_batch_base.py                                       # single-GPU fallback
@@ -83,8 +89,12 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from dist_utils import (
+    all_reduce_sum,
+    barrier,
     cleanup_distributed,
     file_barrier,
+    gather_list,
+    init_distributed,
     init_distributed_lite,
     is_main,
     maybe_relaunch_with_torchrun,
@@ -213,6 +223,84 @@ def evaluate_ppl(model, encodings, device, seq_len, num_words, num_chars, num_by
     }
 
 
+def evaluate_ppl_window_sharded(model, encodings, device, seq_len, num_words, num_chars, num_bytes,
+                                rank: int, world_size: int, show_progress=True):
+    """Run sliding-window PPL with windows sharded across distributed ranks."""
+    reset_peak_memory(device)
+
+    windows = precompute_windows(seq_len, MAX_LENGTH, STRIDE)
+    my_windows = windows[rank::world_size]
+    local_nll_sum = 0.0
+    local_tokens = 0
+    local_chunk_nlls = []
+    t_start = time.perf_counter()
+
+    for begin_loc, end_loc, trg_len in tqdm(my_windows, desc=f"  [rank {rank}] PPL windows",
+                                            leave=False, disable=not show_progress):
+        input_ids = encodings.input_ids[:, begin_loc:end_loc].to(device)
+        target_ids = mask_context_labels(input_ids, trg_len)
+        loss_kwargs = prepare_tail_logits_loss_kwargs(
+            target_ids,
+            trg_len,
+            loss_token_chunk_size=512,
+            output_logits=False,
+        )
+
+        with torch.inference_mode():
+            try:
+                outputs = model(input_ids, labels=target_ids, use_cache=False, **loss_kwargs)
+            except TypeError:
+                outputs = model(input_ids, labels=target_ids)
+            avg_nll = outputs.loss.item()
+
+        local_nll_sum, local_tokens = accumulate_weighted_nll(
+            local_nll_sum, local_tokens, avg_nll, trg_len
+        )
+        local_chunk_nlls.append(avg_nll)
+        del input_ids, target_ids, loss_kwargs, outputs
+
+    elapsed = time.perf_counter() - t_start
+    agg = torch.tensor([local_nll_sum, float(local_tokens)], dtype=torch.float64, device=device)
+    all_reduce_sum(agg)
+    total_nll_sum = agg[0].item()
+    total_tokens = int(agg[1].item())
+    all_chunk_nlls = gather_list(local_chunk_nlls, rank, world_size)
+    elapsed_values = gather_list([elapsed], rank, world_size)
+
+    if not is_main(rank):
+        return None
+
+    elapsed = max(elapsed_values) if elapsed_values else elapsed
+    mean_nll = total_nll_sum / total_tokens
+    token_ppl = math.exp(mean_nll)
+    word_ppl = math.exp(mean_nll * total_tokens / num_words)
+    bpb = (mean_nll * total_tokens / num_bytes) / math.log(2)
+    bpc = (mean_nll * total_tokens / num_chars) / math.log(2)
+    throughput = total_tokens / elapsed
+    chunk_arr = np.array(all_chunk_nlls)
+
+    return {
+        "metrics": {
+            "token_perplexity": round(token_ppl, 4),
+            "word_perplexity": round(word_ppl, 4),
+            "bits_per_byte": round(bpb, 4),
+            "bits_per_char": round(bpc, 4),
+            "mean_nll_nats": round(mean_nll, 4),
+        },
+        "reliability": {
+            "num_chunks": len(all_chunk_nlls),
+            "chunk_nll_mean": round(float(chunk_arr.mean()), 4),
+            "chunk_nll_std": round(float(chunk_arr.std()), 4),
+            "scored_tokens": total_tokens,
+        },
+        "performance": {
+            "throughput_tokens_per_sec": round(throughput, 1),
+            "wall_time_sec": round(elapsed, 2),
+            "peak_memory": peak_memory_str(device),
+        },
+    }
+
+
 def discover_nm_cases(results_root):
     """Return sorted [(n, m, path), ...] for subdirs named like 'n-m'."""
     cases = []
@@ -268,6 +356,10 @@ def run_complete_mode(args):
             cmd.extend(["--mx-chunk-target-mib", str(args.mx_chunk_target_mib)])
         if args.weight_cache_dtype is not None:
             cmd.extend(["--weight-cache-dtype", args.weight_cache_dtype])
+        if args.load_stagger_sec:
+            cmd.extend(["--load-stagger-sec", str(args.load_stagger_sec)])
+        if args.window_shard:
+            cmd.append("--window-shard")
         cmd.extend(["--model-path", MODEL_PATH])
         cmd.extend(["--results-root", str(RESULTS_ROOT)])
         if args.force:
@@ -328,6 +420,12 @@ def main():
                              "Use 0 for every chunk, or a negative value to disable.")
     parser.add_argument("--mxfp-progress-file", default=None,
                         help="Optional path updated atomically with the latest MX/MSD progress event.")
+    parser.add_argument("--load-stagger-sec", type=float, default=0.0, metavar="S",
+                        help="Sleep local_rank*S seconds before tokenizer/model loading in "
+                             "multi-rank runs. Default 0 keeps current behavior.")
+    parser.add_argument("--window-shard", action="store_true",
+                        help="Shard PPL windows across distributed ranks for one selected setup. "
+                             "Requires exactly one setup, e.g. --only 1.")
     parser.add_argument(
         "--output-hook",
         type=str,
@@ -359,8 +457,11 @@ def main():
     maybe_relaunch_with_torchrun(args.nproc)
     RESULTS_DIR = RESULTS_ROOT / f"{args.n}-{args.m}"
 
-    # ── Distributed init (no NCCL — ranks work independently) ──
-    rank, world_size, local_rank, device = init_distributed_lite()
+    # ── Distributed init ──
+    if args.window_shard:
+        rank, world_size, local_rank, device = init_distributed()
+    else:
+        rank, world_size, local_rank, device = init_distributed_lite()
     suppress_warnings(rank)
     dtype = torch.float16 if device.type == "cuda" else torch.float32
 
@@ -391,8 +492,12 @@ def main():
     else:
         run_setups = list(SETUPS)
 
+    if args.window_shard and len(run_setups) != 1:
+        cleanup_distributed()
+        raise SystemExit("ERROR: --window-shard requires exactly one selected setup, e.g. --only 1.")
+
     # Partition setups across ranks (round-robin)
-    my_setups = run_setups[rank::world_size]
+    my_setups = run_setups if args.window_shard else run_setups[rank::world_size]
 
     if is_main(rank):
         print(f"World size: {world_size}  |  Device: {device}  |  dtype: {dtype}")
@@ -404,6 +509,12 @@ def main():
     # ── Device & model ──
     if is_main(rank):
         print("Loading tokenizer & model ...")
+
+    if world_size > 1 and args.load_stagger_sec > 0:
+        delay = local_rank * args.load_stagger_sec
+        if delay > 0:
+            print(f"[rank {rank}] Sleeping {delay:.1f}s before model load.")
+            time.sleep(delay)
 
     if not Path(MODEL_PATH).exists():
         if is_main(rank):
@@ -516,10 +627,21 @@ def main():
             clear_mxfp_progress_hook(model)
 
         # Evaluate
-        results = evaluate_ppl(model, encodings, device, seq_len,
-                               num_words, num_chars, num_bytes,
-                               show_progress=is_main(rank))
+        if args.window_shard:
+            results = evaluate_ppl_window_sharded(
+                model, encodings, device, seq_len,
+                num_words, num_chars, num_bytes,
+                rank, world_size, show_progress=is_main(rank),
+            )
+        else:
+            results = evaluate_ppl(model, encodings, device, seq_len,
+                                   num_words, num_chars, num_bytes,
+                                   show_progress=is_main(rank))
         clear_mxfp_progress_hook(model)
+
+        if results is None:
+            clear_mxfp_weight_cache(model)
+            continue
 
         # Add metadata
         results["setup"] = {"id": sid, "tag": tag, "description": desc,
@@ -529,7 +651,9 @@ def main():
         results["dataset"] = f"{ds_name}/{ds_config}/{ds_split}"
         results["config"] = {"max_length": MAX_LENGTH, "stride": STRIDE,
                              "dtype": str(dtype), "world_size": world_size,
-                             "limit_samples": args.limit_samples}
+                             "limit_samples": args.limit_samples,
+                             "window_shard": bool(args.window_shard),
+                             "load_stagger_sec": args.load_stagger_sec}
         results["output_hook"] = output_hook or None
         results["structured_sparsity"] = {
             "mode": "wanda",
@@ -553,8 +677,11 @@ def main():
 
     local_elapsed = time.perf_counter() - total_start
 
-    # ── Wait for all ranks to finish (file-based, no NCCL timeout) ──
-    file_barrier(rank, world_size, RESULTS_DIR)
+    # ── Wait for all ranks to finish ──
+    if args.window_shard:
+        barrier()
+    else:
+        file_barrier(rank, world_size, RESULTS_DIR)
     total_elapsed = time.perf_counter() - total_start
 
     # ── Summary (rank 0 reads all result files) ──
@@ -610,7 +737,9 @@ def main():
             "output_hook": output_hook or None,
             "eval_config": {"max_length": MAX_LENGTH, "stride": STRIDE,
                             "dtype": str(dtype),
-                            "limit_samples": args.limit_samples},
+                            "limit_samples": args.limit_samples,
+                            "window_shard": bool(args.window_shard),
+                            "load_stagger_sec": args.load_stagger_sec},
             "world_size": world_size,
             "total_wall_time_sec": round(total_elapsed, 2),
             "setups_requested": len(run_setups),

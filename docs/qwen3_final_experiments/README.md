@@ -11,6 +11,8 @@ historical implementation notes under `references/`.
 - `active_plan.md`: current active plan, not a full history.
 - `runtime_estimates.md`: single-setup runtime estimates for the focused Qwen3
   model family, plus pending multi-GPU estimates.
+- `model_execution_matrix.md`: per-model execution recipes and validation gates
+  before final runs.
 
 ## Read When Needed
 

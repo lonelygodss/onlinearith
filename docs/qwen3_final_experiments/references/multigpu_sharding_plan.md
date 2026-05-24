@@ -28,11 +28,24 @@ projection-filter behavior.
   float8` unless newer evidence supersedes it. A two-worker fixed-sum prefix
   run with the default float16 persistent cache OOMed, while the float8-cache
   run preserved PPL and completed.
-- Qwen3-8B full-replica `--nproc` is validated up to four workers for MXFP8
-  and fixed-sum 30 dB MSD. An eight-worker MXFP8 launch on GPUs 0-7 SIGKILLed
-  during model loading/materialization before evaluation, so validate launch
-  scale separately from PPL correctness before using eight workers for final
-  estimates.
+- Qwen3-8B full-replica `--nproc` is validated up to eight workers for MXFP8
+  and fixed-sum 30 dB MSD when using `--load-stagger-sec 8`. An earlier
+  unstaggered eight-worker MXFP8 launch on GPUs 0-7 SIGKILLed during model
+  loading/materialization before evaluation; use staggered loading for
+  eight-replica Qwen3-8B launches.
+- `ppltest.py --load-stagger-sec S` is available to reduce transient host
+  memory and disk I/O spikes during multi-rank full-replica checkpoint loading.
+  It sleeps `local_rank * S` seconds before tokenizer/model loading and records
+  the value in output metadata. This is a launch/load trick only and does not
+  change PPL math.
+- For `wanda_base/ppl_batch_base.py` and `act_base/ppl_batch_base_act.py`,
+  default `--nproc` shards setup IDs. Use the explicit `--window-shard` mode
+  when accelerating one representative setup across PPL windows. Qwen3-8B
+  WANDA 2:4 and activation N:M 2:4 are prefix-validated on eight full replicas
+  with `--window-shard --load-stagger-sec 8`.
+- Qwen3-8B WANDA requires a Qwen3-8B-shaped mask. The committed
+  `../data/wanda_base/2-4/calibration_base_MXFP8.pt` currently has 0.6B-shaped
+  tensors and fails on Qwen3-8B with a 4096-vs-1024 input dimension mismatch.
 - Do not report current `--nproc` `msd_perf_stats` as a full-dataset aggregate:
   nonzero ranks disable MSD stats. Add explicit stats aggregation or use a
   separate single-process accounting run for work metrics.

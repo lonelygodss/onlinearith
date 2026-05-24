@@ -325,6 +325,11 @@ calibration workflow:
                              "Use 0 for every chunk, or a negative value to disable.")
     parser.add_argument("--mxfp-progress-file", default=None,
                         help="Optional path updated atomically with the latest MX/MSD progress event.")
+    parser.add_argument("--load-stagger-sec", type=float, default=0.0, metavar="S",
+                        help="Sleep local_rank*S seconds before tokenizer/model loading in "
+                             "multi-rank runs. This can reduce transient host RAM and disk I/O "
+                             "spikes when many full replicas load the same large checkpoint. "
+                             "Default 0 keeps current behavior.")
     parser.add_argument("--figure5-layer-cycles", action="store_true",
                         help="Enable Figure 5 layer-cycle profiling in lite stats mode. "
                              "Records per-layer cycle moments from block-serial, "
@@ -415,6 +420,12 @@ calibration workflow:
         )
 
     # ── 2. Load model ─────────────────────────────────────────────────────
+    if world_size > 1 and args.load_stagger_sec > 0:
+        delay = local_rank * args.load_stagger_sec
+        if delay > 0:
+            print(f"[rank {rank}] Sleeping {delay:.1f}s before model load.")
+            time.sleep(delay)
+
     if is_main(rank):
         print("Loading tokenizer & model ...")
 
@@ -738,6 +749,7 @@ calibration workflow:
                        "text_manifest": str(manifest_path) if manifest_path else None,
                        "stats": args.stats,
                        "msd_utilization_mode": bool(args.msd_utilization_mode),
+                       "load_stagger_sec": args.load_stagger_sec,
                        "figure5_layer_cycles": bool(args.figure5_layer_cycles)},
             "config_snapshot": get_config_snapshot(model.config),
             "metrics": {

@@ -64,6 +64,10 @@ multi-rank memory accounting.
 | Qwen3-8B | fixed-sum 30 dB | `--nproc 2 --gpus 4,5 --stats off --compile-msd-truncate --weight-cache-dtype float8` | 4,144 | 8.8632 | 2.1819 | 1120.41s | cuda:0 25.0613 GiB |
 | Qwen3-8B | setup 2 MXFP8 | `--nproc 4 --gpus 0,1,2,3 --limit-samples 120 --stats off` | 7,192 | 9.8221 | 2.2846 | 33.2s | cuda:0 27.6147 GiB |
 | Qwen3-8B | fixed-sum 30 dB | `--nproc 4 --gpus 0,1,2,3 --limit-samples 120 --stats off --compile-msd-truncate --weight-cache-dtype float8` | 7,192 | 9.8648 | 2.2890 | 2239.0s | cuda:0 25.0613 GiB |
+| Qwen3-8B | setup 2 MXFP8 | `--nproc 8 --gpus 0,1,2,3,4,5,6,7 --limit-samples 120 --stats off --load-stagger-sec 8` | 7,192 | 9.8221 | 2.2846 | 17.03s | cuda:0 27.6147 GiB |
+| Qwen3-8B | fixed-sum 30 dB | `--nproc 8 --gpus 0,1,2,3,4,5,6,7 --limit-samples 120 --stats off --compile-msd-truncate --weight-cache-dtype float8 --load-stagger-sec 8` | 7,192 | 9.8648 | 2.2890 | 1120.87s | cuda:0 25.0613 GiB |
+| Qwen3-8B | WANDA 2:4 MXFP8 | `wanda_base/ppl_batch_base.py --nproc 8 --gpus 0,1,2,3,4,5,6,7 --limit-samples 120 --window-shard --load-stagger-sec 8` | 7,192 | 18.2443 | 2.9039 | 17.13s | cuda:0 27.61 GB |
+| Qwen3-8B | activation N:M 2:4 MXFP8 | `act_base/ppl_batch_base_act.py --nproc 8 --gpus 0,1,2,3,4,5,6,7 --limit-samples 120 --window-shard --load-stagger-sec 8` | 7,192 | 13.0141 | 2.5660 | 18.26s | cuda:0 27.61 GB |
 
 The fixed-sum run used
 `/tmp/onlinearith_calib_mlp_merged_smoke/calibration_MXFP8_fixed_sum_qwen8b_mlp_merged_snr30_smoke_nocache.json`,
@@ -80,6 +84,16 @@ two real windows without padding. The fixed-sum four-worker runtime stayed
 consistent with the two-worker float8-cache result at about 1120s per assigned
 long forward window.
 
+The WANDA and activation N:M baseline runners needed an explicit
+`--window-shard` mode before validating single-setup acceleration. Their
+default `--nproc` mode shards setup IDs across ranks, so `--only 1 --nproc 8`
+would otherwise load eight ranks but evaluate only on rank 0. The validated
+baseline commands above use `--window-shard`, which requires exactly one
+selected setup and shards the PPL windows across ranks. The WANDA validation
+also confirmed the committed `../data/wanda_base/2-4/calibration_base_MXFP8.pt`
+mask is shaped for Qwen3-0.6B; Qwen3-8B needs a Qwen3-8B-shaped mask such as
+the prior smoke mask under `/tmp/onlinearith_wanda_smoke`.
+
 An eight-worker MXFP8 launch on GPUs 0-7 with the same prefix120 slice failed
 before evaluation: rank 0 was killed with `SIGKILL` during model
 loading/materialization and no output JSON was produced. The GPUs were idle
@@ -87,12 +101,20 @@ before launch (`nvidia-smi` reported about 15 MiB used and 32095 MiB free on
 each of GPUs 0-7), so this is currently a launch/load scaling issue, not a PPL
 correctness or CUDA-forward failure.
 
+After adding the opt-in `ppltest.py --load-stagger-sec` launch/load control, the
+same eight-worker MXFP8 prefix120 run succeeded with `--load-stagger-sec 8`.
+The fixed-sum target-SNR 30 dB run also succeeded with `--load-stagger-sec 8`
+and `--weight-cache-dtype float8`. Both output JSONs record
+`load_stagger_sec: 8.0`, `world_size: 8`, and `device_map: none`. PPL matched
+the four-worker prefix120 runs at recorded precision. Rank 0 processed its
+single assigned long window in 17.03s for MXFP8 and 1120.87s for fixed-sum.
+
 Interpretation: `--nproc` is now prefix-validated for Qwen3-8B MXFP8 and
-fixed-sum MSD PPL quality up to four full replicas. MXFP8 speedup is close to
-2x on the two-window prefix80 case (31.97s single GPU versus 17.02s with two
-workers). Fixed-sum MSD preserves PPL and avoids OOM with float8 cache. The
-validated full-run estimate should use four workers until the eight-replica
-launch/load SIGKILL is understood.
+fixed-sum MSD PPL quality up to eight full replicas with staggered loading.
+MXFP8 speedup is close to 2x on the two-window prefix80 case (31.97s single GPU
+versus 17.02s with two workers) and about 8x by assigned-window scaling on
+prefix120. Fixed-sum MSD preserves PPL and avoids OOM with float8 cache; the
+eight-worker estimate should scale from one assigned long window per rank.
 
 ## Model-Sharded PPL Smoke Evidence
 
