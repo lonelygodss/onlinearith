@@ -70,6 +70,13 @@ Current status:
 - For Qwen3-8B WANDA final PPL, use a Qwen3-8B-shaped mask. The committed
   `../data/wanda_base/2-4/calibration_base_MXFP8.pt` is shaped for Qwen3-0.6B
   and fails on Qwen3-8B.
+- `docs/qwen3_final_experiments/final_run_commands.md` now contains the concrete
+  Qwen3-8B command sheet for fixed-sum calibration, WANDA mask generation, and
+  the four final PPL runs. It uses suffixed WANDA outputs and a separate
+  activation results root to avoid overwriting smaller-model artifacts.
+- `tools/merge_msd_calibrations.py` is available to merge disjoint
+  projection-filtered fixed-sum calibration JSONs into one PPL-ready
+  calibration file.
 - The same fixed-sum `--nproc 2` run with the default float16 persistent weight
   cache OOMed on rank 1. Use `--weight-cache-dtype float8` for Qwen3-8B MSD
   full-replica multi-GPU PPL unless a newer memory fix supersedes this.
@@ -86,12 +93,12 @@ Current status:
   1998.8s for the historical single-GPU prefix.
 
 Next iteration:
-1. Prepare final full-run commands for the representative four-path Qwen3-8B
-   family: MXFP8, fixed-sum target-SNR 30 dB MSD, WANDA 2:4, and activation
-   N:M 2:4. Use `model_execution_matrix.md` for per-path flags.
-2. For WANDA final PPL, either promote/generate a Qwen3-8B-shaped 2:4 mask in
-   the intended results root or pass a compatible `--output-hook`; do not use
-   the committed 0.6B-shaped mask.
+1. Run or schedule the calibration prerequisites in `final_run_commands.md`:
+   projection-filtered fixed-sum jobs plus merge, and a Qwen3-8B-shaped WANDA
+   2:4 mask with `--output-hook qwen8b_final`.
+2. After prerequisites exist, run the four final PPL commands from
+   `final_run_commands.md`: MXFP8, fixed-sum target-SNR 30 dB MSD, WANDA 2:4,
+   and activation N:M 2:4.
 3. Treat `--device-map sequential` as memory relief only unless `balanced` or
    manual placement shows direct-CUDA speedup over single-GPU and `--nproc`.
 4. Remember that current `--nproc` disables MSD stats on nonzero ranks; use it

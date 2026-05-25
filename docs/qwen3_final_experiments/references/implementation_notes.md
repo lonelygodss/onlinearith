@@ -95,6 +95,8 @@ The following paths have comparable runner hygiene:
 - Fixed-sum calibrated MSD:
   - calibration generation has chunk/cache/GPU/compile/projection-filter
     controls;
+  - `tools/merge_msd_calibrations.py` merges disjoint projection-filtered
+    calibration JSONs into one PPL-ready `msd_calibration_data` map;
   - `ppltest.py --calibration` injects metadata into the optimized MSD runtime.
 - WANDA:
   - `wanda_base/calibrate_base.py`

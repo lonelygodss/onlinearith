@@ -57,12 +57,15 @@ Representative paths:
    or add rank-level stats aggregation before reporting aggregate work metrics.
 5. For fixed-sum calibration, prefer task parallelism over model sharding:
    run projection-filtered full-replica jobs on separate GPUs, then merge the
-   resulting metadata with the established staged-calibration workflow.
+   resulting metadata with `tools/merge_msd_calibrations.py`.
 6. Update `docs/qwen3_final_experiments/runtime_estimates.md` with measured
    single-GPU and multi-GPU wall-time estimates as each representative path is
    validated.
 7. Keep generated calibration/result artifacts out of commits unless explicitly
    requested.
+
+Concrete Qwen3-8B commands are collected in
+`docs/qwen3_final_experiments/final_run_commands.md`.
 
 ## Sharding Guardrails
 

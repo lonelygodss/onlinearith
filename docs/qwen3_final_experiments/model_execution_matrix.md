@@ -3,6 +3,7 @@
 This file settles the per-model execution policy before final runs. It is a
 recipe matrix, not a new methodology. PPL math, datasets, tokenizer behavior,
 window constants, labels, and weighted NLL accumulation remain unchanged.
+Concrete Qwen3-8B launch commands live in `final_run_commands.md`.
 
 ## Global Defaults
 

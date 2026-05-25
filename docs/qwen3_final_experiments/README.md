@@ -13,6 +13,8 @@ historical implementation notes under `references/`.
   model family, plus pending multi-GPU estimates.
 - `model_execution_matrix.md`: per-model execution recipes and validation gates
   before final runs.
+- `final_run_commands.md`: concrete Qwen3-8B calibration and final PPL command
+  sheet for the representative four-path family.
 
 ## Read When Needed
 
@@ -29,9 +31,11 @@ copies under `docs/`.
 
 - `scripts/run_qwen8b_oom_ladder.sh`
 - `tools/probe_mxfp_memory.py`
+- `tools/merge_msd_calibrations.py`
 - `tests/test_mx_exact_chunked.py`
 - `tests/test_mxfp_weight_cache_compact.py`
 - `tests/test_msd_truncate_equivalence.py`
 - `tests/test_ppl_device_map_utils.py`
 - `tests/test_ppl_tail_logits_loss.py`
 - `tests/test_nm_keep_semantics.py`
+- `tests/test_merge_msd_calibrations.py`
